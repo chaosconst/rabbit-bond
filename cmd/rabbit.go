@@ -2,18 +2,18 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"github.com/ihciah/rabbit-tcp/client"
 	"github.com/ihciah/rabbit-tcp/connection"
 	"github.com/ihciah/rabbit-tcp/logger"
 	"github.com/ihciah/rabbit-tcp/server"
 	"github.com/ihciah/rabbit-tcp/tunnel"
 	"github.com/ihciah/rabbit-tcp/tunnel_pool"
-	"fmt"
 	"log"
 	"os"
 	"strconv"
-	"time"
 	"strings"
+	"time"
 )
 
 var Version = "No version information"

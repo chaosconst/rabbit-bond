@@ -55,7 +55,7 @@ const (
 	// it no later than the best tunnel would (within this slack), so slow or
 	// congested tunnels become overflow capacity instead of holding up the stream.
 	// (flowSchedRatio / flowSchedSlack are vars above: RABBIT_FLOW_SCHED_PCT, RABBIT_FLOW_SCHED_SLACK_MS.)
-	flowPollEvery  = 5 * time.Millisecond
+	flowPollEvery = 5 * time.Millisecond
 
 	// A block un-acknowledged for max(stallRTTs × minRTT, stallMin) is considered
 	// stuck (e.g. TCP retransmission on a lossy path) and is re-sent on another tunnel.
