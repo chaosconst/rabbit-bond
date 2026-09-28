@@ -6,11 +6,14 @@ import (
 	"github.com/ihciah/rabbit-tcp/logger"
 	"github.com/ihciah/rabbit-tcp/server"
 	"github.com/ihciah/rabbit-tcp/tunnel"
+	"github.com/ihciah/rabbit-tcp/tunnel_pool"
 	"log"
 	"strings"
 )
 
 var Version = "No version information"
+
+var flowControl bool
 
 const (
 	ClientMode = iota
@@ -29,6 +32,7 @@ func parseFlags() (pass bool, mode int, password string, addr string, listen str
 	flag.IntVar(&tunnelN, "tunnelN", 4, "[Client Only] number of tunnels to use in rabbit-tcp")
 	flag.IntVar(&verbose, "verbose", 2, "verbose level(0~5)")
 	flag.BoolVar(&printVersion, "version", false, "show version")
+	flag.BoolVar(&flowControl, "flow", false, "per-tunnel ack and in-flight limiting for tunnels over paths of different speed (both peers must enable it)")
 	flag.Parse()
 
 	pass = true
@@ -90,6 +94,7 @@ func main() {
 	}
 	cipher, _ := tunnel.NewAEADCipher("CHACHA20-IETF-POLY1305", nil, password)
 	logger.LEVEL = verbose
+	tunnel_pool.FlowControl = flowControl
 	if mode == ClientMode {
 		c := client.NewClient(tunnelN, addr, cipher)
 		c.ServeForward(listen, dest)

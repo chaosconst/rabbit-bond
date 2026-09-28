@@ -5,6 +5,7 @@ import (
 	"github.com/ihciah/rabbit-tcp/block"
 	"github.com/ihciah/rabbit-tcp/logger"
 	"sync"
+	"time"
 )
 
 type TunnelPool struct {
@@ -35,7 +36,77 @@ func NewTunnelPool(peerID uint32, manager Manager, peerContext context.Context) 
 	}
 	tp.logger.Infof("Tunnel Pool of peer %d created.\n", peerID)
 	go manager.DecreaseNotify(tp)
+	if FlowControl && flowReinjectOn {
+		go tp.reinjectLoop()
+	}
 	return tp
+}
+
+// schedulable reports whether t should take the next block now: only if it is
+// expected to deliver it about as early as the best tunnel (earliest completion
+// first). Stuck tunnels are skipped.
+func (tp *TunnelPool) schedulable(t *Tunnel) bool {
+	if !flowSchedOn {
+		return true
+	}
+	now := time.Now()
+	mine, stuck := t.flow.estimate(block.MaxSize, now)
+	if stuck {
+		return false
+	}
+	best := mine
+	tp.mutex.Lock()
+	for _, other := range tp.tunnelMapping {
+		if other == t || other.flow == nil {
+			continue
+		}
+		if est, stuck := other.flow.estimate(block.MaxSize, now); !stuck && est < best {
+			best = est
+		}
+	}
+	tp.mutex.Unlock()
+	return float64(mine) <= float64(best)*flowSchedRatio+float64(flowSchedSlack)
+}
+
+// reinjectLoop re-sends blocks stuck on one tunnel through the others. It only acts
+// while some tunnel is healthy; if all are stuck the receiver is probably just slow.
+func (tp *TunnelPool) reinjectLoop() {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-tp.ctx.Done():
+			return
+		case now := <-ticker.C:
+			tp.mutex.Lock()
+			tunnels := make([]*Tunnel, 0, len(tp.tunnelMapping))
+			for _, t := range tp.tunnelMapping {
+				if t.flow != nil {
+					tunnels = append(tunnels, t)
+				}
+			}
+			tp.mutex.Unlock()
+			healthy := false
+			for _, t := range tunnels {
+				if _, stuck := t.flow.estimate(0, now); !stuck {
+					healthy = true
+					break
+				}
+			}
+			if !healthy {
+				continue
+			}
+			for _, t := range tunnels {
+				for _, blk := range t.flow.stuckBlocks(now) {
+					select {
+					case tp.sendRetryQueue <- blk:
+					default:
+						go func(b block.Block) { tp.sendRetryQueue <- b }(blk)
+					}
+				}
+			}
+		}
+	}
 }
 
 // Add a tunnel to tunnelPool and start bi-relay
@@ -44,6 +115,7 @@ func (tp *TunnelPool) AddTunnel(tunnel *Tunnel) {
 	tp.mutex.Lock()
 	defer tp.mutex.Unlock()
 
+	tunnel.pool = tp
 	tp.tunnelMapping[tunnel.tunnelID] = tunnel
 	tp.manager.Notify(tp)
 

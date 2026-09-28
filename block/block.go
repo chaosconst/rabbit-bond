@@ -16,6 +16,11 @@ const (
 	ShutdownWrite
 	ShutdownBoth
 
+	// TypeAck is only sent when flow control is enabled on both peers. It travels on a
+	// tunnel (ConnectionID 0) and carries, in BlockID, the low 32 bits of the total
+	// bytes received on that tunnel. It is consumed by the tunnel, never by a connection.
+	TypeAck = 0x10
+
 	HeaderSize = 1 + 4 + 4 + 4
 	DataSize   = 16*1024 - 13
 	MaxSize    = HeaderSize + DataSize
@@ -108,5 +113,12 @@ func NewDisconnectBlock(connectID uint32, blockID uint32, shutdownType uint8) Bl
 		BlockID:      blockID,
 		BlockLength:  1,
 		BlockData:    []byte{shutdownType},
+	}
+}
+
+func NewAckBlock(receivedBytes uint32) Block {
+	return Block{
+		Type:    TypeAck,
+		BlockID: receivedBytes,
 	}
 }

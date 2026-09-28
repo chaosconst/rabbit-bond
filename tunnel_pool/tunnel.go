@@ -22,6 +22,8 @@ type Tunnel struct {
 	tunnelID uint32
 	peerID   uint32
 	logger   *logger.Logger
+	flow     *flowState // nil unless FlowControl
+	pool     *TunnelPool
 }
 
 // Create a new tunnel from a net.Conn and cipher with random tunnelID
@@ -43,6 +45,9 @@ func newTunnelWithID(conn net.Conn, ciph tunnel.Cipher, peerID uint32) Tunnel {
 		peerID:   peerID,
 		tunnelID: tunnelID,
 		logger:   logger.NewLogger(fmt.Sprintf("[Tunnel-%d]", tunnelID)),
+	}
+	if FlowControl {
+		tun.flow = newFlowState()
 	}
 	tun.logger.Infoln("Tunnel created.")
 	return tun
@@ -110,12 +115,19 @@ func (tunnel *Tunnel) recvPeerID() (uint32, error) {
 // Read block from send channel, pack it and send
 func (tunnel *Tunnel) OutboundRelay(normalQueue, retryQueue chan block.Block) {
 	tunnel.logger.Infoln("Outbound relay started.")
+	if tunnel.flow != nil {
+		defer tunnel.requeuePending(retryQueue)
+		go tunnel.logFlowStats()
+	}
 	for {
 		// cancel is of highest priority
 		select {
 		case <-tunnel.ctx.Done():
 			return
 		default:
+		}
+		if tunnel.flow != nil && !tunnel.waitWindow() {
+			return
 		}
 		// retryQueue is of secondary highest priority
 		select {
@@ -141,6 +153,10 @@ func (tunnel *Tunnel) packThenSend(blk block.Block, retryQueue chan block.Block)
 	dataToSend := blk.Pack()
 	reader := bytes.NewReader(dataToSend)
 
+	if tunnel.flow != nil {
+		tunnel.flow.writeMu.Lock()
+		defer tunnel.flow.writeMu.Unlock()
+	}
 	tunnel.Conn.SetWriteDeadline(time.Now().Add(TunnelBlockTimeoutSec * time.Second))
 	n, err := io.Copy(tunnel.Conn, reader)
 	if err != nil || n != int64(len(dataToSend)) {
@@ -153,6 +169,9 @@ func (tunnel *Tunnel) packThenSend(blk block.Block, retryQueue chan block.Block)
 		// Use new goroutine to avoid channel blocked
 	} else {
 		tunnel.Conn.SetWriteDeadline(time.Time{})
+		if tunnel.flow != nil {
+			tunnel.flow.onSent(blk, len(dataToSend))
+		}
 		tunnel.logger.Debugf("Copied data to tunnel successfully(n: %d).\n", n)
 	}
 }
@@ -168,6 +187,9 @@ func (tunnel *Tunnel) InboundRelay(output chan<- block.Block) {
 				// Will never be blocked because the tunnel is closed
 				blk, err := block.NewBlockFromReader(tunnel.Conn)
 				if err == nil {
+					if blk.Type == block.TypeAck {
+						continue
+					}
 					tunnel.logger.Debugf("Block received from tunnel(type: %d) successfully after close.\n", blk.Type)
 					output <- *blk
 				} else {
@@ -183,7 +205,7 @@ func (tunnel *Tunnel) InboundRelay(output chan<- block.Block) {
 				tunnel.logger.Errorf("Error when receiving block from tunnel: %v.\n", err)
 				// Tunnel down and message has not been fully read.
 				tunnel.closeThenCancel()
-			} else {
+			} else if tunnel.handleFlowBlock(blk) {
 				tunnel.logger.Debugf("Block received from tunnel(type: %d)successfully.\n", blk.Type)
 				output <- *blk
 			}
@@ -198,4 +220,81 @@ func (tunnel *Tunnel) GetPeerID() uint32 {
 func (tunnel *Tunnel) closeThenCancel() {
 	tunnel.Close()
 	tunnel.cancel()
+}
+
+// handleFlowBlock consumes acks and acknowledges everything else. It returns
+// whether blk should be passed on to the connection layer.
+func (tunnel *Tunnel) handleFlowBlock(blk *block.Block) bool {
+	if tunnel.flow == nil {
+		return true
+	}
+	if blk.Type == block.TypeAck {
+		tunnel.flow.onAck(blk.BlockID)
+		return false
+	}
+	tunnel.flow.recv += uint64(block.HeaderSize) + uint64(blk.BlockLength)
+	ack := block.NewAckBlock(uint32(tunnel.flow.recv))
+	tunnel.flow.writeMu.Lock()
+	tunnel.Conn.SetWriteDeadline(time.Now().Add(TunnelBlockTimeoutSec * time.Second))
+	_, err := tunnel.Conn.Write(ack.Pack())
+	tunnel.Conn.SetWriteDeadline(time.Time{})
+	tunnel.flow.writeMu.Unlock()
+	if err != nil {
+		tunnel.logger.Warnf("Error when send ack to tunnel: %v.\n", err)
+		tunnel.closeThenCancel()
+	}
+	return true
+}
+
+// waitWindow blocks until this tunnel has window and is a good choice for the next
+// block. Other tunnels' acks change the answer too, hence the short poll.
+func (tunnel *Tunnel) waitWindow() bool {
+	timer := time.NewTimer(flowPollEvery)
+	defer timer.Stop()
+	for !tunnel.flow.canSend() || !tunnel.pool.schedulable(tunnel) {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(flowPollEvery)
+		select {
+		case <-tunnel.flow.ackCh:
+		case <-timer.C:
+		case <-tunnel.ctx.Done():
+			return false
+		}
+	}
+	return true
+}
+
+// requeuePending hands un-acknowledged blocks of a dead tunnel to the other tunnels;
+// the receiver drops duplicates, so re-sending a block that did arrive is harmless.
+func (tunnel *Tunnel) requeuePending(retryQueue chan block.Block) {
+	blocks := tunnel.flow.takePending()
+	if len(blocks) == 0 {
+		return
+	}
+	tunnel.logger.Infof("Re-queue %d un-acknowledged blocks.\n", len(blocks))
+	go func() {
+		for _, blk := range blocks {
+			retryQueue <- blk
+		}
+	}()
+}
+
+func (tunnel *Tunnel) logFlowStats() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-tunnel.ctx.Done():
+			return
+		case <-ticker.C:
+			cwnd, inflight, rate, rtt := tunnel.flow.stats()
+			tunnel.logger.Infof("flow cwnd=%dKB inflight=%dKB rate=%.1fMbps minRTT=%dms\n",
+				cwnd/1024, inflight/1024, rate*8/1e6, rtt.Milliseconds())
+		}
+	}
 }
