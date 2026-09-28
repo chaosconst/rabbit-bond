@@ -2,6 +2,7 @@ package tunnel_pool
 
 import (
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -25,11 +26,19 @@ var FlowControl = false
 var (
 	flowSchedOn    = os.Getenv("RABBIT_FLOW_SCHED") != "0"
 	flowReinjectOn = os.Getenv("RABBIT_FLOW_REINJECT") != "0"
+	flowMinWindow  = uint64(envInt("RABBIT_FLOW_MINWIN_KB", 2048)) * 1024
+	flowStallMin   = time.Duration(envInt("RABBIT_FLOW_STALL_MS", 1000)) * time.Millisecond
 )
 
+func envInt(name string, def int) int {
+	if v, err := strconv.Atoi(os.Getenv(name)); err == nil {
+		return v
+	}
+	return def
+}
+
 const (
-	flowInitWindow = 256 * 1024
-	flowMinWindow  = 128 * 1024
+	flowInitWindow = 2048 * 1024
 	flowMaxWindow  = 16 * 1024 * 1024
 	flowGain       = 2.0
 	flowRateWindow = 3 * time.Second // how long a max delivery-rate sample stays valid
@@ -44,8 +53,7 @@ const (
 
 	// A block un-acknowledged for max(stallRTTs × minRTT, stallMin) is considered
 	// stuck (e.g. TCP retransmission on a lossy path) and is re-sent on another tunnel.
-	flowStallRTTs = 3
-	flowStallMin  = 200 * time.Millisecond
+	flowStallRTTs = 8
 )
 
 type pendingBlock struct {
