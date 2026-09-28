@@ -6,6 +6,8 @@ import (
 	"github.com/ihciah/rabbit-tcp/tunnel"
 	"go.uber.org/atomic"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -49,9 +51,10 @@ func (cm *ClientManager) DecreaseNotify(pool *TunnelPool) {
 		}
 
 		cm.logger.Infof("Need %d new tunnels now.\n", tunnelToCreate)
-		conn, err := net.Dial("tcp", cm.endpoint)
+		endpoint := cm.pickEndpoint(pool)
+		conn, err := net.Dial("tcp", endpoint)
 		if err != nil {
-			cm.logger.Errorf("Error when dial to %s: %v.\n", cm.endpoint, err)
+			cm.logger.Errorf("Error when dial to %s: %v.\n", endpoint, err)
 			time.Sleep(ErrorWaitSec * time.Second)
 			continue
 		}
@@ -61,13 +64,44 @@ func (cm *ClientManager) DecreaseNotify(pool *TunnelPool) {
 			time.Sleep(ErrorWaitSec * time.Second)
 			continue
 		}
+		tun.endpoint = endpoint
 		pool.AddTunnel(&tun)
 		tunnelToCreate--
-		cm.logger.Infof("Successfully dialed to %s. TunnelToCreate: %d\n", cm.endpoint, tunnelToCreate)
+		cm.logger.Infof("Successfully dialed to %s. TunnelToCreate: %d\n", endpoint, tunnelToCreate)
 	}
 }
 
 func (cm *ClientManager) Notify(pool *TunnelPool) {}
+
+// pickEndpoint spreads tunnels over several endpoints (one per network path).
+// -rabbit-addr accepts "host:port*weight,host:port*weight"; a new tunnel goes to the
+// endpoint with the lowest (tunnels+1)/weight, so a path that lost tunnels is refilled first.
+func (cm *ClientManager) pickEndpoint(pool *TunnelPool) string {
+	parts := strings.Split(cm.endpoint, ",")
+	if len(parts) == 1 {
+		return strings.SplitN(parts[0], "*", 2)[0]
+	}
+	count := map[string]int{}
+	pool.mutex.Lock()
+	for _, t := range pool.tunnelMapping {
+		count[t.endpoint]++
+	}
+	pool.mutex.Unlock()
+	best, bestScore := "", 0.0
+	for _, p := range parts {
+		addr, w := p, 1.0
+		if i := strings.Index(p, "*"); i >= 0 {
+			addr = p[:i]
+			if v, err := strconv.ParseFloat(p[i+1:], 64); err == nil && v > 0 {
+				w = v
+			}
+		}
+		if score := float64(count[addr]+1) / w; best == "" || score < bestScore {
+			best, bestScore = addr, score
+		}
+	}
+	return best
+}
 
 type ServerManager struct {
 	notifyLock          sync.Mutex // Only one notify can run in the same time

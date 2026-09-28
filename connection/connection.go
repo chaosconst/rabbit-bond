@@ -84,6 +84,14 @@ func (bc *baseConnection) deliver(blk block.Block) {
 	}
 }
 
+// sendNack asks the peer to re-send a missing block; dropped if the send queue is full.
+func (bc *baseConnection) sendNack(blockID uint32) {
+	select {
+	case bc.sendQueue <- block.NewNackBlock(bc.connectionID, blockID):
+	default:
+	}
+}
+
 func (bc *baseConnection) SendConnect(address string) {
 	bc.logger.Debugf("Send connect to %s block.\n", address)
 	blk := bc.blockProcessor.packConnect(address, bc.connectionID)

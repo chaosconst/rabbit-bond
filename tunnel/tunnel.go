@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -86,8 +87,10 @@ type reader struct {
 func NewReader(r io.Reader, aead cipher.AEAD) io.Reader { return newReader(r, aead) }
 
 func newReader(r io.Reader, aead cipher.AEAD) *reader {
+	// Buffered: each record is read as a 2-byte header then its payload, which unbuffered
+	// costs two syscalls per 16 KB — enough to show up as the top CPU cost at ~500 Mbit/s.
 	return &reader{
-		Reader: r,
+		Reader: bufio.NewReaderSize(r, 256<<10),
 		AEAD:   aead,
 		buf:    make([]byte, payloadSizeMask+aead.Overhead()),
 		nonce:  make([]byte, aead.NonceSize()),

@@ -21,6 +21,11 @@ const (
 	// bytes received on that tunnel. It is consumed by the tunnel, never by a connection.
 	TypeAck = 0x10
 
+	// TypeNack (flow control only) asks the sender to re-send one block the receiver has
+	// been waiting for while later blocks keep arriving (head-of-line hole): ConnectionID
+	// and BlockID name the missing block. Consumed by the sender's tunnel pool.
+	TypeNack = 0x11
+
 	HeaderSize = 1 + 4 + 4 + 4
 	DataSize   = 16*1024 - 13
 	MaxSize    = HeaderSize + DataSize
@@ -114,6 +119,10 @@ func NewDisconnectBlock(connectID uint32, blockID uint32, shutdownType uint8) Bl
 		BlockLength:  1,
 		BlockData:    []byte{shutdownType},
 	}
+}
+
+func NewNackBlock(connectID uint32, blockID uint32) Block {
+	return Block{Type: TypeNack, ConnectionID: connectID, BlockID: blockID}
 }
 
 func NewAckBlock(receivedBytes uint32) Block {

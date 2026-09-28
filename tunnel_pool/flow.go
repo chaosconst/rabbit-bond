@@ -28,6 +28,14 @@ var (
 	flowReinjectOn = os.Getenv("RABBIT_FLOW_REINJECT") != "0"
 	flowMinWindow  = uint64(envInt("RABBIT_FLOW_MINWIN_KB", 2048)) * 1024
 	flowStallMin   = time.Duration(envInt("RABBIT_FLOW_STALL_MS", 1000)) * time.Millisecond
+	flowStallRTTs  = time.Duration(envInt("RABBIT_FLOW_STALL_RTTS", 8))
+	flowSchedRatio = float64(envInt("RABBIT_FLOW_SCHED_PCT", 120)) / 100
+	flowSchedSlack = time.Duration(envInt("RABBIT_FLOW_SCHED_SLACK_MS", 20)) * time.Millisecond
+	// RABBIT_FLOW_RATE=ack falls back to the old ack-interval rate sampling.
+	rateSampleByBlock = os.Getenv("RABBIT_FLOW_RATE") != "ack"
+	// cwnd = gain × max delivery rate × min RTT. 2 assumes the path itself adds no queueing
+	// under load; home Wi-Fi / carrier queues do, so a higher gain may be needed.
+	flowGain = float64(envInt("RABBIT_FLOW_GAIN_PCT", 200)) / 100
 )
 
 func envInt(name string, def int) int {
@@ -40,25 +48,24 @@ func envInt(name string, def int) int {
 const (
 	flowInitWindow = 2048 * 1024
 	flowMaxWindow  = 16 * 1024 * 1024
-	flowGain       = 2.0
 	flowRateWindow = 3 * time.Second // how long a max delivery-rate sample stays valid
 	flowMinSample  = 10 * time.Millisecond
 
 	// Scheduling: a tunnel may take the next block only if it is expected to deliver
 	// it no later than the best tunnel would (within this slack), so slow or
 	// congested tunnels become overflow capacity instead of holding up the stream.
-	flowSchedSlack = 20 * time.Millisecond
-	flowSchedRatio = 1.2
+	// (flowSchedRatio / flowSchedSlack are vars above: RABBIT_FLOW_SCHED_PCT, RABBIT_FLOW_SCHED_SLACK_MS.)
 	flowPollEvery  = 5 * time.Millisecond
 
 	// A block un-acknowledged for max(stallRTTs × minRTT, stallMin) is considered
 	// stuck (e.g. TCP retransmission on a lossy path) and is re-sent on another tunnel.
-	flowStallRTTs = 8
+	// (flowStallRTTs is a var above, RABBIT_FLOW_STALL_RTTS.)
 )
 
 type pendingBlock struct {
 	end        uint64 // cumulative sent bytes after this block
 	sentAt     time.Time
+	ackedAt    uint64 // f.acked when this block was sent (delivery-rate sample base)
 	blk        block.Block
 	reinjected bool
 }
@@ -103,7 +110,7 @@ func (f *flowState) canSend() bool {
 func (f *flowState) onSent(blk block.Block, size int) {
 	f.mu.Lock()
 	f.sent += uint64(size)
-	f.pending = append(f.pending, pendingBlock{end: f.sent, sentAt: time.Now(), blk: blk})
+	f.pending = append(f.pending, pendingBlock{end: f.sent, sentAt: time.Now(), ackedAt: f.acked, blk: blk})
 	f.mu.Unlock()
 }
 
@@ -116,17 +123,32 @@ func (f *flowState) onAck(low uint32) {
 	if acked > f.sent {
 		acked = f.sent
 	}
+	// Delivery-rate sample per acked block (as in BBR): bytes acked while that block was in
+	// flight, divided by its flight time. Unlike "bytes acked / time between acks" this is
+	// not inflated when acks arrive in bursts after a queue drains, which made cwnd (and the
+	// standing queue) balloon to ~1 s and set off the stuck-block detector.
 	i := 0
+	var sample float64
 	for ; i < len(f.pending) && f.pending[i].end <= acked; i++ {
-		rtt := now.Sub(f.pending[i].sentAt)
+		p := f.pending[i]
+		rtt := now.Sub(p.sentAt)
 		if f.minRTT == 0 || rtt < f.minRTT {
 			f.minRTT = rtt
+		}
+		if rateSampleByBlock && rtt >= flowMinSample {
+			if r := float64(acked-p.ackedAt) / rtt.Seconds(); r > sample {
+				sample = r
+			}
 		}
 	}
 	f.pending = append(f.pending[:0], f.pending[i:]...)
 	f.acked = acked
 
-	if f.sampleStart.IsZero() {
+	if rateSampleByBlock {
+		if sample > 0 && (sample > f.maxRate || now.Sub(f.maxRateAt) > flowRateWindow) {
+			f.maxRate, f.maxRateAt = sample, now
+		}
+	} else if f.sampleStart.IsZero() {
 		f.sampleStart, f.sampleAcked = now, acked
 	} else if elapsed := now.Sub(f.sampleStart); elapsed >= f.minRTT && elapsed >= flowMinSample {
 		rate := float64(acked-f.sampleAcked) / elapsed.Seconds()
@@ -212,4 +234,17 @@ func (f *flowState) stuckBlocks(now time.Time) []block.Block {
 		}
 	}
 	return out
+}
+
+// findPending returns the un-acknowledged data block (connID, blockID), if this tunnel holds it.
+func (f *flowState) findPending(connID, blockID uint32) (block.Block, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.pending {
+		b := f.pending[i].blk
+		if b.ConnectionID == connID && b.BlockID == blockID && b.Type == block.TypeData {
+			return b, true
+		}
+	}
+	return block.Block{}, false
 }

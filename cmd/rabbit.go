@@ -3,11 +3,16 @@ package main
 import (
 	"flag"
 	"github.com/ihciah/rabbit-tcp/client"
+	"github.com/ihciah/rabbit-tcp/connection"
 	"github.com/ihciah/rabbit-tcp/logger"
 	"github.com/ihciah/rabbit-tcp/server"
 	"github.com/ihciah/rabbit-tcp/tunnel"
 	"github.com/ihciah/rabbit-tcp/tunnel_pool"
+	"fmt"
 	"log"
+	"os"
+	"strconv"
+	"time"
 	"strings"
 )
 
@@ -92,9 +97,27 @@ func main() {
 	if !pass {
 		return
 	}
-	cipher, _ := tunnel.NewAEADCipher("CHACHA20-IETF-POLY1305", nil, password)
+	// Tunnels usually already ride inside TLS, so this layer mostly authenticates.
+	// RABBIT_CIPHER=AES-128-GCM uses the CPU's AES instructions; both peers must agree.
+	cipherName := "CHACHA20-IETF-POLY1305"
+	if v := os.Getenv("RABBIT_CIPHER"); v != "" {
+		cipherName = v
+	}
+	cipher, err := tunnel.NewAEADCipher(cipherName, nil, password)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cipher %s: %v\n", cipherName, err)
+		os.Exit(2)
+	}
 	logger.LEVEL = verbose
 	tunnel_pool.FlowControl = flowControl
+	if flowControl {
+		// RABBIT_NACK_MS=0 disables NACKs (peer without NACK support); default 200 ms.
+		ms := 200
+		if v, err := strconv.Atoi(os.Getenv("RABBIT_NACK_MS")); err == nil {
+			ms = v
+		}
+		connection.NackAfter = time.Duration(ms) * time.Millisecond
+	}
 	if mode == ClientMode {
 		c := client.NewClient(tunnelN, addr, cipher)
 		c.ServeForward(listen, dest)

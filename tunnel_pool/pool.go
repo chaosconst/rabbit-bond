@@ -5,6 +5,7 @@ import (
 	"github.com/ihciah/rabbit-tcp/block"
 	"github.com/ihciah/rabbit-tcp/logger"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,6 +37,7 @@ func NewTunnelPool(peerID uint32, manager Manager, peerContext context.Context) 
 	}
 	tp.logger.Infof("Tunnel Pool of peer %d created.\n", peerID)
 	go manager.DecreaseNotify(tp)
+	registerPool(tp)
 	if FlowControl && flowReinjectOn {
 		go tp.reinjectLoop()
 	}
@@ -98,6 +100,7 @@ func (tp *TunnelPool) reinjectLoop() {
 			}
 			for _, t := range tunnels {
 				for _, blk := range t.flow.stuckBlocks(now) {
+					atomic.AddUint64(&reinjectCnt, uint64(len(blk.Pack())))
 					select {
 					case tp.sendRetryQueue <- blk:
 					default:
@@ -147,4 +150,31 @@ func (tp *TunnelPool) GetSendQueue() chan block.Block {
 
 func (tp *TunnelPool) GetRecvQueue() chan block.Block {
 	return tp.recvQueue
+}
+
+// NackResent counts blocks re-sent because the receiver reported a hole (for /debug/flow).
+var NackResent uint64
+
+// resendForNack re-queues the named block if some tunnel still holds it un-acknowledged.
+// A block already acked reached the receiver's rabbit, so the hole will close by itself.
+func (tp *TunnelPool) resendForNack(connID, blockID uint32) {
+	tp.mutex.Lock()
+	tunnels := make([]*Tunnel, 0, len(tp.tunnelMapping))
+	for _, t := range tp.tunnelMapping {
+		if t.flow != nil {
+			tunnels = append(tunnels, t)
+		}
+	}
+	tp.mutex.Unlock()
+	for _, t := range tunnels {
+		if blk, ok := t.flow.findPending(connID, blockID); ok {
+			atomic.AddUint64(&NackResent, 1)
+			select {
+			case tp.sendRetryQueue <- blk:
+			default:
+				go func(b block.Block) { tp.sendRetryQueue <- b }(blk)
+			}
+			return
+		}
+	}
 }

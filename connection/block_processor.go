@@ -20,7 +20,19 @@ type blockProcessor struct {
 	sendBlockID     atomic.Uint32
 	recvBlockID     uint32
 	lastRecvBlockID uint32
+
+	holeSince time.Time // when the current head-of-line hole (recvBlockID missing, later blocks cached) opened
+	lastNack  time.Time
 }
+
+// NackAfter > 0 enables NACKs (set by main when flow control is on, both peers must support
+// it): a hole older than NackAfter is reported to the sender, and again every NackAfter.
+var NackAfter time.Duration
+
+// NackSent counts NACKs sent (for /debug/flow).
+var NackSent atomic.Uint64
+
+type nackSender interface{ sendNack(blockID uint32) }
 
 func newBlockProcessor(ctx context.Context, removeFromPool context.CancelFunc) blockProcessor {
 	return blockProcessor{
@@ -35,8 +47,27 @@ func newBlockProcessor(ctx context.Context, removeFromPool context.CancelFunc) b
 // TODO: If waiting a packet for TIMEOUT, break the connection; otherwise re-countdown for next waiting packet.
 func (x *blockProcessor) OrderedRelay(connection Connection) {
 	x.logger.Infof("Ordered Relay of Connection %d started.\n", connection.GetConnectionID())
+	var tick <-chan time.Time
+	if NackAfter > 0 {
+		t := time.NewTicker(NackAfter / 4)
+		defer t.Stop()
+		tick = t.C
+	}
+	ns, _ := connection.(nackSender)
 	for {
 		select {
+		case now := <-tick:
+			if len(x.cache) == 0 || ns == nil {
+				x.holeSince = time.Time{}
+				continue
+			}
+			if x.holeSince.IsZero() {
+				x.holeSince = now
+			} else if now.Sub(x.holeSince) >= NackAfter && now.Sub(x.lastNack) >= NackAfter {
+				ns.sendNack(x.recvBlockID)
+				x.lastNack = now
+				NackSent.Inc()
+			}
 		case blk := <-connection.getRecvQueue():
 			if blk.BlockID+1 > x.lastRecvBlockID {
 				// Update lastRecvBlockID
@@ -49,6 +80,7 @@ func (x *blockProcessor) OrderedRelay(connection Connection) {
 					return
 				}
 				x.recvBlockID++
+				x.holeSince = time.Time{}
 				for {
 					blk, ok := x.cache[x.recvBlockID]
 					if !ok {

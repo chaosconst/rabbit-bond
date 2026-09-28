@@ -24,6 +24,7 @@ type Tunnel struct {
 	logger   *logger.Logger
 	flow     *flowState // nil unless FlowControl
 	pool     *TunnelPool
+	endpoint string // client side: which -rabbit-addr endpoint (network path) this tunnel was dialed to
 }
 
 // Create a new tunnel from a net.Conn and cipher with random tunnelID
@@ -232,7 +233,20 @@ func (tunnel *Tunnel) handleFlowBlock(blk *block.Block) bool {
 		tunnel.flow.onAck(blk.BlockID)
 		return false
 	}
+	if blk.Type == block.TypeNack {
+		tunnel.flow.recv += uint64(block.HeaderSize) + uint64(blk.BlockLength)
+		tunnel.sendAck()
+		if tunnel.pool != nil {
+			tunnel.pool.resendForNack(blk.ConnectionID, blk.BlockID)
+		}
+		return false
+	}
 	tunnel.flow.recv += uint64(block.HeaderSize) + uint64(blk.BlockLength)
+	tunnel.sendAck()
+	return true
+}
+
+func (tunnel *Tunnel) sendAck() {
 	ack := block.NewAckBlock(uint32(tunnel.flow.recv))
 	tunnel.flow.writeMu.Lock()
 	tunnel.Conn.SetWriteDeadline(time.Now().Add(TunnelBlockTimeoutSec * time.Second))
@@ -243,7 +257,6 @@ func (tunnel *Tunnel) handleFlowBlock(blk *block.Block) bool {
 		tunnel.logger.Warnf("Error when send ack to tunnel: %v.\n", err)
 		tunnel.closeThenCancel()
 	}
-	return true
 }
 
 // waitWindow blocks until this tunnel has window and is a good choice for the next
