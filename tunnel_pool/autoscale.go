@@ -60,6 +60,7 @@ type autoScaler struct {
 	total   uint64            // cumulative bytes received over all tunnels, ever
 	history []autoPoint
 	busyFor time.Time // start of the current busy stretch (zero when not busy)
+	dialing map[string]bool
 	logf    func(string, ...interface{})
 }
 
@@ -84,7 +85,7 @@ var (
 )
 
 func newAutoScaler(spec string, logf func(string, ...interface{})) *autoScaler {
-	a := &autoScaler{paths: map[string]*autoPath{}, seen: map[uint32]uint64{}}
+	a := &autoScaler{paths: map[string]*autoPath{}, seen: map[uint32]uint64{}, dialing: map[string]bool{}}
 	a.logf = func(f string, v ...interface{}) {
 		autoStateMu.Lock()
 		autoLog = append(autoLog, time.Now().Format("15:04:05 ")+fmt.Sprintf(f, v...))
@@ -115,6 +116,22 @@ func (a *autoScaler) want(count map[string]int) map[string]int {
 		}
 	}
 	return out
+}
+
+func (a *autoScaler) startDialing(ep string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.dialing[ep] {
+		return false
+	}
+	a.dialing[ep] = true
+	return true
+}
+
+func (a *autoScaler) doneDialing(ep string) {
+	a.mu.Lock()
+	a.dialing[ep] = false
+	a.mu.Unlock()
 }
 
 // rate is the total receive rate over the last autoWindow (bytes/s), ok=false if not enough history.
@@ -207,15 +224,18 @@ func (a *autoScaler) step(now time.Time, tunnels []*Tunnel) map[string]int {
 		}
 		for _, ep := range a.order {
 			p := a.paths[ep]
-			if count[ep] < p.target || !steady {
-				break // wait until all are up and the load is steady before measuring anything
+			if !steady {
+				break // measure only steady load
+			}
+			if count[ep] < p.target {
+				continue // not up (still dialing, or the path is down): probe the others
 			}
 			if p.plateau == 0 && p.target < autoMax {
 				a.probe = &autoProbe{ep: ep, before: p.target, rateBefore: rate, doubling: true}
 				p.target = imin(2*p.target, autoMax)
 				break
 			}
-			if p.plateau > 0 && now.Sub(p.settledAt) >= autoReprobe && p.target < autoMax {
+			if p.plateau > 0 && now.Sub(p.settledAt) >= autoReprobe && p.target < autoMax && count[ep] == p.target {
 				a.probe = &autoProbe{ep: ep, before: p.target, rateBefore: rate}
 				p.target = imin(p.target+imax(1, p.target/4), autoMax)
 				p.settledAt = now
@@ -224,12 +244,15 @@ func (a *autoScaler) step(now time.Time, tunnels []*Tunnel) map[string]int {
 		}
 	}
 
+	// Extra tunnels (an undone step, or idle shrink) are closed only while not busy: closing one
+	// mid-transfer strands the blocks queued on it until the peer notices and re-sends them,
+	// which stalls the stream for seconds (measured); a few surplus tunnels cost far less.
 	close := map[string]int{}
 	for ep, p := range a.paths {
 		if !busy && now.Sub(p.lastBusy) >= autoIdle && p.target > autoMin && a.probe == nil {
 			p.target = autoMin
 		}
-		if d := count[ep] - p.target; d > 0 {
+		if d := count[ep] - p.target; d > 0 && !busy {
 			close[ep] = d
 		}
 	}

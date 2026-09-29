@@ -122,3 +122,29 @@ func TestAutoScaleDoesNotProbeDuringRampUp(t *testing.T) {
 		t.Fatalf("decided before the load was steady: %s", l)
 	}
 }
+
+func TestAutoScaleNeverClosesWhileBusy(t *testing.T) {
+	s := &sim{t: t, now: time.Unix(0, 0),
+		paths: map[string]simPath{"home": {35, 520, 20}, "g5": {30, 260, 12}},
+		a:     newAutoScaler("home,g5", func(string, ...interface{}) {})}
+	max := 0
+	for i := 0; i < 180; i++ { // 90 s of load, tracking whether a count ever went down
+		before := s.counts()
+		s.run(autoTick, 10000)
+		after := s.counts()
+		for ep := range before {
+			if after[ep] < before[ep] {
+				t.Fatalf("closed %s tunnels under load: %d -> %d", ep, before[ep], after[ep])
+			}
+		}
+		if n := after["home"] + after["g5"]; n > max {
+			max = n
+		}
+	}
+	s.run(3*time.Second, 0) // load gone: surplus from undone steps is closed now
+	c := s.counts()
+	if c["home"] != s.a.paths["home"].target || c["g5"] != s.a.paths["g5"].target {
+		t.Fatalf("surplus not closed after load: %v targets %d/%d", c, s.a.paths["home"].target, s.a.paths["g5"].target)
+	}
+	t.Logf("peak %d tunnels under load, after load %v", max, c)
+}

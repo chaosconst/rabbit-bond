@@ -31,7 +31,12 @@ type Tunnel struct {
 // Create a new tunnel from a net.Conn and cipher with random tunnelID
 func NewActiveTunnel(conn net.Conn, ciph tunnel.Cipher, peerID uint32) (Tunnel, error) {
 	tun := newTunnelWithID(conn, ciph, peerID)
-	return tun, tun.activeExchangePeerID()
+	// A path that accepts the connection and then hangs (no signal, a relay dropping packets)
+	// must not block the dialer forever.
+	conn.SetDeadline(time.Now().Add(HandshakeTimeoutSec * time.Second))
+	err := tun.activeExchangePeerID()
+	conn.SetDeadline(time.Time{})
+	return tun, err
 }
 
 func NewPassiveTunnel(conn net.Conn, ciph tunnel.Cipher) (Tunnel, error) {

@@ -81,39 +81,31 @@ func (cm *ClientManager) DecreaseNotify(pool *TunnelPool) {
 	}
 }
 
-// autoDial opens what the auto scaler asks for; a round already dialing makes this a no-op.
+// autoDial opens what the auto scaler asks for. Each endpoint dials on its own, so a path that
+// hangs (no signal, a relay dropping packets) never holds up refilling the others.
 func (cm *ClientManager) autoDial(pool *TunnelPool) {
-	if !cm.decreaseNotifyLock.TryLock() {
-		return
+	count := map[string]int{}
+	pool.mutex.Lock()
+	for _, t := range pool.tunnelMapping {
+		count[t.endpoint]++
 	}
-	defer cm.decreaseNotifyLock.Unlock()
-	for {
-		select {
-		case <-pool.ctx.Done():
-			return
-		default:
+	pool.mutex.Unlock()
+	for ep, n := range cm.auto.want(count) {
+		if !cm.auto.startDialing(ep) {
+			continue // this endpoint is already dialing
 		}
-		count := map[string]int{}
-		pool.mutex.Lock()
-		for _, t := range pool.tunnelMapping {
-			count[t.endpoint]++
-		}
-		pool.mutex.Unlock()
-		want := cm.auto.want(count)
-		if len(want) == 0 {
-			return
-		}
-		var wg sync.WaitGroup
-		for ep, n := range want {
+		go func(ep string, n int) {
+			defer cm.auto.doneDialing(ep)
+			var wg sync.WaitGroup
 			for i := 0; i < n; i++ {
 				wg.Add(1)
-				go func(ep string) {
+				go func() {
 					defer wg.Done()
 					cm.dialOne(pool, ep)
-				}(ep)
+				}()
 			}
-		}
-		wg.Wait()
+			wg.Wait()
+		}(ep, n)
 	}
 }
 
