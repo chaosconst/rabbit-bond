@@ -53,7 +53,8 @@ func envInt(name string, def int) int {
 }
 
 const (
-	flowInitWindow = 2048 * 1024
+	flowInitWindow = 512 * 1024
+	flowFreshRate  = 10e6 / 8 // bytes/s assumed for a tunnel not measured yet
 	flowMaxWindow  = 16 * 1024 * 1024
 	flowRateWindow = 3 * time.Second // how long a max delivery-rate sample stays valid
 	flowMinSample  = 10 * time.Millisecond
@@ -280,6 +281,11 @@ func (f *flowState) estimate(size int, now time.Time) (time.Duration, bool) {
 	// picked again and re-measured instead of being excluded forever.
 	if f.maxRate > 0 && now.Sub(f.maxRateAt) <= flowRateWindow {
 		est += time.Duration(float64(f.sent-f.acked+uint64(size)) / f.maxRate * float64(time.Second))
+	} else if f.maxRate == 0 {
+		// A new tunnel has no rate yet and is in TCP slow start: counted as queue-free it looked
+		// like the fastest path and got a whole window at once, which it needs seconds to deliver
+		// (holes, stalls). Assume a modest rate until it is measured.
+		est += time.Duration(float64(f.sent-f.acked+uint64(size)) / flowFreshRate * float64(time.Second))
 	}
 	return est, false
 }
