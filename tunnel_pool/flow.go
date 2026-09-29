@@ -54,6 +54,8 @@ const (
 	flowMaxWindow  = 16 * 1024 * 1024
 	flowRateWindow = 3 * time.Second // how long a max delivery-rate sample stays valid
 	flowMinSample  = 10 * time.Millisecond
+	// A second NACKed hole on the same tunnel within this window re-sends all it holds.
+	flowNackBulkWindow = time.Second
 
 	// Scheduling: a tunnel may take the next block only if it is expected to deliver
 	// it no later than the best tunnel would (within this slack), so slow or
@@ -93,7 +95,8 @@ type flowState struct {
 	maxRateAt   time.Time
 	sampleStart time.Time
 	sampleAcked uint64
-	ackHist     []ackPoint // flowRateAvgWin: acks within the window (plus one older as base)
+	ackHist     []ackPoint
+	lastNack    time.Time // last NACKed hole this tunnel held // flowRateAvgWin: acks within the window (plus one older as base)
 	cwnd        uint64
 }
 
@@ -267,24 +270,31 @@ func (f *flowState) stuckBlocks(now time.Time) []block.Block {
 	return out
 }
 
-// nackPending returns this tunnel's unacked data blocks of connID from the NACKed hole on, or
-// nil if the hole is not pending here. The hole shows this tunnel is behind, so everything it
-// still holds for the connection is late too: re-sending only the hole would stall the stream
-// once per block, NackAfter each. Blocks already re-sent for a NACK are skipped, except the hole.
+// nackPending returns the blocks to re-send for a NACKed hole of connID that this tunnel holds
+// (nil if it does not hold it). The first hole a tunnel causes costs only that block: usually
+// the tunnel is just briefly slow and what follows arrives right behind it. A second hole within
+// flowNackBulkWindow means it is stalled; then everything it holds for the connection is re-sent,
+// since re-sending one block per NACK would stall the stream NackAfter per block.
+// Blocks already re-sent for a NACK are skipped, except the hole itself.
 func (f *flowState) nackPending(connID, blockID uint32) []block.Block {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []block.Block
+	now := time.Now()
+	bulk := now.Sub(f.lastNack) < flowNackBulkWindow
 	for i := range f.pending {
 		p := &f.pending[i]
 		b := p.blk
 		if b.ConnectionID != connID || b.Type != block.TypeData || b.BlockID < blockID {
 			continue
 		}
-		if b.BlockID == blockID || (len(out) > 0 && !p.nacked) {
+		if b.BlockID == blockID || (bulk && len(out) > 0 && !p.nacked) {
 			p.nacked = true
 			out = append(out, b)
 		}
+	}
+	if len(out) > 0 {
+		f.lastNack = now
 	}
 	return out
 }
