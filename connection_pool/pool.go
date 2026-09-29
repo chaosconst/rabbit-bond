@@ -7,14 +7,21 @@ import (
 	"github.com/ihciah/rabbit-tcp/logger"
 	"github.com/ihciah/rabbit-tcp/tunnel_pool"
 	"sync"
+	"time"
 )
 
 const (
 	SendQueueSize = 48 // SendQueue channel cap
+
+	// A block of a connection removed less than closedMemory ago is dropped instead of opening a
+	// new connection: a late copy (duplicated head block, re-sent block) would otherwise dial the
+	// target again and leave an orphan connection there.
+	closedMemory = 2 * time.Minute
 )
 
 type ConnectionPool struct {
 	connectionMapping   map[uint32]connection.Connection
+	closed              map[uint32]time.Time // recently removed connections, see recvRelay
 	mappingLock         sync.RWMutex
 	tunnelPool          *tunnel_pool.TunnelPool
 	sendQueue           chan block.Block
@@ -29,6 +36,7 @@ func NewConnectionPool(pool *tunnel_pool.TunnelPool, acceptNewConnection bool, b
 	ctx, cancel := context.WithCancel(backgroundCtx)
 	cp := &ConnectionPool{
 		connectionMapping:   make(map[uint32]connection.Connection),
+		closed:              make(map[uint32]time.Time),
 		tunnelPool:          pool,
 		sendQueue:           make(chan block.Block, SendQueueSize),
 		acceptNewConnection: acceptNewConnection,
@@ -81,6 +89,13 @@ func (cp *ConnectionPool) removeConnection(conn connection.Connection) {
 	if _, ok := cp.connectionMapping[conn.GetConnectionID()]; ok {
 		delete(cp.connectionMapping, conn.GetConnectionID())
 	}
+	now := time.Now()
+	cp.closed[conn.GetConnectionID()] = now
+	for id, at := range cp.closed {
+		if now.Sub(at) >= closedMemory {
+			delete(cp.closed, id)
+		}
+	}
 }
 
 // Deliver blocks from tunnelPool channel to specified connections
@@ -96,6 +111,13 @@ func (cp *ConnectionPool) recvRelay() {
 			conn, ok = cp.connectionMapping[connID]
 			cp.mappingLock.RUnlock()
 			if !ok {
+				cp.mappingLock.RLock()
+				at, gone := cp.closed[connID]
+				cp.mappingLock.RUnlock()
+				if gone && time.Since(at) < closedMemory {
+					cp.logger.Debugf("Block %d of closed connection %d dropped.\n", blk.BlockID, connID)
+					continue
+				}
 				if cp.acceptNewConnection {
 					conn = cp.NewPooledOutboundConnection(blk.ConnectionID)
 					cp.logger.Infoln("Connection created and added to connectionPool.")

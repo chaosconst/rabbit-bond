@@ -26,6 +26,9 @@ const (
 	// and BlockID name the missing block. Consumed by the sender's tunnel pool.
 	TypeNack = 0x11
 
+	// TypeLine tells the receiving end which network path a tunnel runs on (BlockData).
+	TypeLine = 0x12
+
 	HeaderSize = 1 + 4 + 4 + 4
 	DataSize   = 16*1024 - 13
 	MaxSize    = HeaderSize + DataSize
@@ -130,4 +133,8 @@ func NewAckBlock(receivedBytes uint32) Block {
 		Type:    TypeAck,
 		BlockID: receivedBytes,
 	}
+}
+
+func NewLineBlock(line string) Block {
+	return Block{Type: TypeLine, BlockLength: uint32(len(line)), BlockData: []byte(line)}
 }

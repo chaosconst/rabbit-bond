@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"github.com/ihciah/rabbit-tcp/block"
 	"github.com/ihciah/rabbit-tcp/logger"
+	"github.com/ihciah/rabbit-tcp/trace"
 	"github.com/ihciah/rabbit-tcp/tunnel"
 	"io"
 	"math/rand"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,6 +27,7 @@ type Tunnel struct {
 	flow     *flowState // nil unless FlowControl
 	pool     *TunnelPool
 	endpoint string // client side: which -rabbit-addr endpoint (network path) this tunnel was dialed to
+	line     string // exit line of the path (both sides; see dup.go)
 	created  time.Time
 }
 
@@ -158,6 +161,16 @@ func (tunnel *Tunnel) OutboundRelay(normalQueue, retryQueue chan block.Block) {
 }
 
 func (tunnel *Tunnel) packThenSend(blk block.Block, retryQueue chan block.Block) {
+	if tunnel.send(blk, retryQueue) && tunnel.pool != nil && wantDup(blk) {
+		if other := tunnel.pool.dupTunnel(tunnel); other != nil {
+			atomic.AddUint64(&DupSent, 1)
+			go other.send(blk, retryQueue)
+		}
+	}
+}
+
+// send writes one block to the tunnel; false if the tunnel failed (the block is re-queued).
+func (tunnel *Tunnel) send(blk block.Block, retryQueue chan block.Block) bool {
 	dataToSend := blk.Pack()
 	reader := bytes.NewReader(dataToSend)
 
@@ -175,13 +188,18 @@ func (tunnel *Tunnel) packThenSend(blk block.Block, retryQueue chan block.Block)
 			retryQueue <- blk
 		}()
 		// Use new goroutine to avoid channel blocked
+		return false
 	} else {
 		tunnel.Conn.SetWriteDeadline(time.Time{})
 		if tunnel.flow != nil {
 			tunnel.flow.onSent(blk, len(dataToSend))
 		}
+		if trace.On && blk.Type <= block.TypeData && blk.BlockID < trace.FirstBlocks {
+			trace.Logf("tx cid=%d bid=%d type=%d len=%d tunnel=%d ep=%s", blk.ConnectionID, blk.BlockID, blk.Type, len(blk.BlockData), tunnel.tunnelID, tunnel.endpoint)
+		}
 		tunnel.logger.Debugf("Copied data to tunnel successfully(n: %d).\n", n)
 	}
+	return true
 }
 
 // Read bytes from connection, parse it to block then put in recv channel
@@ -214,6 +232,9 @@ func (tunnel *Tunnel) InboundRelay(output chan<- block.Block) {
 				// Tunnel down and message has not been fully read.
 				tunnel.closeThenCancel()
 			} else if tunnel.handleFlowBlock(blk) {
+				if trace.On && blk.Type <= block.TypeData && blk.BlockID < trace.FirstBlocks {
+					trace.Logf("rx cid=%d bid=%d type=%d len=%d tunnel=%d ep=%s", blk.ConnectionID, blk.BlockID, blk.Type, len(blk.BlockData), tunnel.tunnelID, tunnel.endpoint)
+				}
 				tunnel.logger.Debugf("Block received from tunnel(type: %d)successfully.\n", blk.Type)
 				output <- *blk
 			}
@@ -238,6 +259,14 @@ func (tunnel *Tunnel) handleFlowBlock(blk *block.Block) bool {
 	}
 	if blk.Type == block.TypeAck {
 		tunnel.flow.onAck(blk.BlockID)
+		return false
+	}
+	if blk.Type == block.TypeLine {
+		if tunnel.pool != nil { // dupTunnel reads endpoints under the pool lock
+			tunnel.pool.mutex.Lock()
+			defer tunnel.pool.mutex.Unlock()
+		}
+		tunnel.line = string(blk.BlockData)
 		return false
 	}
 	if blk.Type == block.TypeNack {

@@ -56,6 +56,11 @@ var (
 	// let every tunnel within 3x the best RTT take a block, so small requests went to any tunnel;
 	// now they go to the earliest one, while under load (queues) the allowance is as wide as before.
 	flowSchedQueue = os.Getenv("RABBIT_FLOW_SCHED_QUEUE") == "1"
+	// RABBIT_FLOW_EXTRA=1 (with LATE_MS): also add the tunnel's typical delay beyond its expected
+	// delivery for blocks that are not late. The scheduling RTT is the tunnel's lowest in 30 s, so a
+	// path that is steadily 150 ms slower than that (a congested return path in the evening) still
+	// looked as early as a clean one and kept getting the small blocks.
+	flowExtra = os.Getenv("RABBIT_FLOW_EXTRA") == "1"
 )
 
 func envInt(name string, def int) int {
@@ -130,6 +135,7 @@ type flowState struct {
 	lateAt      time.Time
 	lateBy      time.Duration // mean lateness of late blocks (beyond their expected delivery)
 	lates       uint64        // late blocks (for /debug/flow)
+	extra       time.Duration // mean delay beyond expected delivery of blocks that are not late, as of lateAt
 }
 
 type ackPoint struct {
@@ -283,7 +289,7 @@ func (f *flowState) noteBaseRTT(rtt time.Duration, now time.Time) {
 
 // noteLate takes one delivered block's lateness (actual minus expected delivery).
 func (f *flowState) noteLate(by time.Duration, now time.Time) {
-	p := f.latePLocked(now)
+	p, e := f.latePLocked(now), f.extraLocked(now)
 	if by > flowLateAfter {
 		p += (1 - p) * flowLateGain
 		if f.lateBy == 0 {
@@ -294,8 +300,12 @@ func (f *flowState) noteLate(by time.Duration, now time.Time) {
 		f.lates++
 	} else {
 		p -= p * flowLateGain
+		if by < 0 {
+			by = 0
+		}
+		e += (by - e) / 8
 	}
-	f.lateP, f.lateAt = p, now
+	f.lateP, f.extra, f.lateAt = p, e, now
 }
 
 func (f *flowState) latePLocked(now time.Time) float64 {
@@ -303,6 +313,13 @@ func (f *flowState) latePLocked(now time.Time) float64 {
 		return 0
 	}
 	return f.lateP * math.Exp2(-float64(now.Sub(f.lateAt))/float64(flowLateHalfLife))
+}
+
+func (f *flowState) extraLocked(now time.Time) time.Duration {
+	if f.extra == 0 {
+		return 0
+	}
+	return time.Duration(float64(f.extra) * math.Exp2(-float64(now.Sub(f.lateAt))/float64(flowLateHalfLife)))
 }
 
 // schedRTTLocked is the RTT scheduling and stall detection use.
@@ -339,6 +356,9 @@ func (f *flowState) estimateParts(size int, now time.Time) (est, queue time.Dura
 	est = f.schedRTTLocked() + queue
 	if flowLateAfter > 0 {
 		est += time.Duration(f.latePLocked(now) * float64(f.lateBy))
+		if flowExtra {
+			est += f.extraLocked(now)
+		}
 	}
 	return est, queue, false
 }

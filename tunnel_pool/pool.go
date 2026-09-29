@@ -131,6 +131,12 @@ func (tp *TunnelPool) AddTunnel(tunnel *Tunnel) {
 		tp.RemoveTunnel(tunnel)
 	}()
 
+	if tunnel.endpoint != "" {
+		tunnel.line = lineOf(tunnel.endpoint)
+		if flowDupFirst > 0 && tunnel.flow != nil {
+			tunnel.sendLine()
+		}
+	}
 	go tunnel.OutboundRelay(tp.sendQueue, tp.sendRetryQueue)
 	go tunnel.InboundRelay(tp.recvQueue)
 }

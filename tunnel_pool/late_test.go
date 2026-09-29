@@ -81,3 +81,27 @@ func TestLoadedPoolKeepsAllowance(t *testing.T) {
 		t.Fatalf("under load the slower tunnel must still take blocks (overflow capacity)")
 	}
 }
+
+func TestSteadilySlowPathLosesSmallBlocks(t *testing.T) {
+	withLate(t, 300*time.Millisecond, true)
+	now := time.Now()
+	home, sh2 := idleTunnel(1, 60*time.Millisecond, now), idleTunnel(2, 70*time.Millisecond, now)
+	tp := &TunnelPool{tunnelMapping: map[uint32]*Tunnel{1: home, 2: sh2}}
+	for i := 0; i < 40; i++ { // home's return path is 150 ms slower than its best, never 300 ms late
+		home.flow.noteLate(150*time.Millisecond, now)
+		sh2.flow.noteLate(10*time.Millisecond, now)
+	}
+	if !tp.schedulable(home) {
+		t.Fatalf("without EXTRA the lowest-RTT tunnel keeps the small blocks")
+	}
+	flowExtra = true
+	defer func() { flowExtra = false }()
+	if tp.schedulable(home) || !tp.schedulable(sh2) {
+		t.Fatalf("extra %v vs %v: the steadily slower path should lose small blocks", home.flow.extra, sh2.flow.extra)
+	}
+	// Idle for 4 half-lives: home's extra has mostly decayed and it is tried again.
+	later := now.Add(4 * flowLateHalfLife)
+	if e, _ := home.flow.estimate(0, later); e > 60*time.Millisecond+15*time.Millisecond {
+		t.Fatalf("extra did not decay: %v", e)
+	}
+}

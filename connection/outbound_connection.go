@@ -3,6 +3,7 @@ package connection
 import (
 	"context"
 	"fmt"
+	"github.com/ihciah/rabbit-tcp/trace"
 	"io"
 	"net"
 	"time"
@@ -53,10 +54,14 @@ func (oc *OutboundConnection) closeThenCancel() {
 // real connection -> ConnectionPool's SendQueue -> TunnelPool
 func (oc *OutboundConnection) RecvRelay() {
 	recvBuffer := make([]byte, OutboundRecvBuffer)
+	reads := 0
 	for {
 		oc.HalfOpenConn.SetReadDeadline(time.Now().Add(OutboundBlockTimeoutSec * time.Second))
 		n, err := oc.HalfOpenConn.Read(recvBuffer)
 		if err == nil {
+			if reads++; reads <= trace.FirstBlocks {
+				trace.Logf("dest_read cid=%d n=%d", oc.connectionID, n)
+			}
 			oc.sendData(recvBuffer[:n])
 			oc.HalfOpenConn.SetReadDeadline(time.Time{})
 		} else if err == io.EOF {
@@ -141,7 +146,9 @@ func (oc *OutboundConnection) connect(address string) {
 	if !oc.closed.Load() || oc.HalfOpenConn != nil {
 		return
 	}
+	trace.Logf("dial_start cid=%d addr=%s", oc.connectionID, address)
 	rawConn, err := net.Dial("tcp", address)
+	trace.Logf("dial_done cid=%d err=%v", oc.connectionID, err)
 	if err == nil {
 		oc.logger.Infof("Dial to %s successfully.\n", address)
 		oc.HalfOpenConn = rawConn.(*net.TCPConn)
