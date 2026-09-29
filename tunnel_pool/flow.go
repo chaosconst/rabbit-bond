@@ -68,6 +68,7 @@ type pendingBlock struct {
 	ackedAt    uint64 // f.acked when this block was sent (delivery-rate sample base)
 	blk        block.Block
 	reinjected bool
+	nacked     bool // already re-sent for a NACK
 }
 
 type flowState struct {
@@ -236,15 +237,24 @@ func (f *flowState) stuckBlocks(now time.Time) []block.Block {
 	return out
 }
 
-// findPending returns the un-acknowledged data block (connID, blockID), if this tunnel holds it.
-func (f *flowState) findPending(connID, blockID uint32) (block.Block, bool) {
+// nackPending returns this tunnel's unacked data blocks of connID from the NACKed hole on, or
+// nil if the hole is not pending here. The hole shows this tunnel is behind, so everything it
+// still holds for the connection is late too: re-sending only the hole would stall the stream
+// once per block, NackAfter each. Blocks already re-sent for a NACK are skipped, except the hole.
+func (f *flowState) nackPending(connID, blockID uint32) []block.Block {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	var out []block.Block
 	for i := range f.pending {
-		b := f.pending[i].blk
-		if b.ConnectionID == connID && b.BlockID == blockID && b.Type == block.TypeData {
-			return b, true
+		p := &f.pending[i]
+		b := p.blk
+		if b.ConnectionID != connID || b.Type != block.TypeData || b.BlockID < blockID {
+			continue
+		}
+		if b.BlockID == blockID || (len(out) > 0 && !p.nacked) {
+			p.nacked = true
+			out = append(out, b)
 		}
 	}
-	return block.Block{}, false
+	return out
 }

@@ -167,12 +167,14 @@ func (tp *TunnelPool) resendForNack(connID, blockID uint32) {
 	}
 	tp.mutex.Unlock()
 	for _, t := range tunnels {
-		if blk, ok := t.flow.findPending(connID, blockID); ok {
-			atomic.AddUint64(&NackResent, 1)
-			select {
-			case tp.sendRetryQueue <- blk:
-			default:
-				go func(b block.Block) { tp.sendRetryQueue <- b }(blk)
+		if blks := t.flow.nackPending(connID, blockID); len(blks) > 0 {
+			atomic.AddUint64(&NackResent, uint64(len(blks)))
+			for _, blk := range blks {
+				select {
+				case tp.sendRetryQueue <- blk:
+				default:
+					go func(b block.Block) { tp.sendRetryQueue <- b }(blk)
+				}
 			}
 			return
 		}
