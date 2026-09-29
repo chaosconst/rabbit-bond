@@ -59,3 +59,15 @@ func TestLinesGroupEndpoints(t *testing.T) {
 		t.Fatal("an endpoint not listed is its own line")
 	}
 }
+
+func TestWantDupDatagram(t *testing.T) {
+	old := flowDupDgram
+	defer func() { flowDupDgram = old }()
+	flowDupDgram = 1400
+	if !wantDup(block.Block{Type: block.TypeDatagram, BlockID: 99999, BlockData: make([]byte, 100)}) {
+		t.Fatal("a small datagram is always doubled")
+	}
+	if wantDup(block.Block{Type: block.TypeDatagram, BlockData: make([]byte, 1500)}) {
+		t.Fatal("a large datagram is not")
+	}
+}

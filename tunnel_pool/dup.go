@@ -21,8 +21,12 @@ import (
 // client; an endpoint not listed is a line of its own. A client tunnel tells the server its line
 // in a TypeLine block right after it joins the pool (not counted in flow accounting). An old
 // server does not know TypeLine, so upgrade the server first.
+//
+// RABBIT_FLOW_DUP_DGRAM=N: every UDP datagram block of at most N bytes is duplicated the same way
+// (games, voice, DNS: small packets where the earlier copy is all that matters).
 var (
 	flowDupFirst = uint32(envInt("RABBIT_FLOW_DUP_FIRST", 0))
+	flowDupDgram = envInt("RABBIT_FLOW_DUP_DGRAM", 0)
 	flowLines    = parseLines(os.Getenv("RABBIT_FLOW_LINES"))
 )
 
@@ -47,6 +51,9 @@ func lineOf(endpoint string) string {
 // DupSent counts duplicated blocks (for /debug/flow).
 var DupSent uint64
 
+// UDP session counters, kept by connection_pool (for /debug/flow).
+var DatagramSent, DatagramRecv, DatagramQueueDrop, DatagramTooOld uint64
+
 func (tunnel *Tunnel) sendLine() {
 	blk := block.NewLineBlock(tunnel.line)
 	tunnel.flow.writeMu.Lock()
@@ -59,6 +66,9 @@ func (tunnel *Tunnel) sendLine() {
 }
 
 func wantDup(blk block.Block) bool {
+	if blk.Type == block.TypeDatagram {
+		return len(blk.BlockData) <= flowDupDgram
+	}
 	return flowDupFirst > 0 && blk.Type <= block.TypeData && blk.BlockID < flowDupFirst
 }
 

@@ -44,3 +44,8 @@ func (cp *ClientPeer) Dial(address string) connection.Connection {
 	conn.SendConnect(address)
 	return conn
 }
+
+// OpenDatagram starts a UDP session through the tunnels (see connection_pool/datagram.go).
+func (cp *ClientPeer) OpenDatagram(deliver func(frame []byte)) (send func(frame []byte), end func()) {
+	return cp.connectionPool.OpenDatagram(deliver)
+}

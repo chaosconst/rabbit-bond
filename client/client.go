@@ -45,8 +45,13 @@ func (c *Client) ServeForward(listen, dest string) error {
 			var drop socksDrop
 			if socksLocalGreeting {
 				var err error
-				if prefix, drop, err = answerSocks(conn); err != nil {
+				var udp bool
+				if prefix, drop, udp, err = answerSocks(conn); err != nil {
 					_ = conn.Close()
+					return
+				}
+				if udp {
+					c.serveUDP(conn)
 					return
 				}
 			}

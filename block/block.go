@@ -29,6 +29,10 @@ const (
 	// TypeLine tells the receiving end which network path a tunnel runs on (BlockData).
 	TypeLine = 0x12
 
+	// TypeDatagram carries one UDP datagram of a session (ConnectionID) with a sequence number
+	// (BlockID); it is not ordered or re-sent, only de-duplicated.
+	TypeDatagram = 0x13
+
 	HeaderSize = 1 + 4 + 4 + 4
 	DataSize   = 16*1024 - 13
 	MaxSize    = HeaderSize + DataSize
@@ -137,4 +141,8 @@ func NewAckBlock(receivedBytes uint32) Block {
 
 func NewLineBlock(line string) Block {
 	return Block{Type: TypeLine, BlockLength: uint32(len(line)), BlockData: []byte(line)}
+}
+
+func NewDatagramBlock(sessionID uint32, seq uint32, frame []byte) Block {
+	return Block{Type: TypeDatagram, ConnectionID: sessionID, BlockID: seq, BlockLength: uint32(len(frame)), BlockData: frame}
 }

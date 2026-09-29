@@ -41,44 +41,48 @@ type socksDrop struct {
 }
 
 // answerSocks reads the application's first bytes. It returns what to send into the tunnel before
-// relaying the rest, and which of the far server's answers to drop.
-func answerSocks(conn net.Conn) (prefix []byte, drop socksDrop, err error) {
+// relaying the rest, and which of the far server's answers to drop; udp means the application asked
+// for UDP ASSOCIATE and it is to be served here (socks_udp.go).
+func answerSocks(conn net.Conn) (prefix []byte, drop socksDrop, udp bool, err error) {
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	defer conn.SetReadDeadline(time.Time{})
 	head := make([]byte, 2)
 	if _, err = io.ReadFull(conn, head); err != nil {
-		return nil, drop, err
+		return nil, drop, false, err
 	}
 	if head[0] != 5 || head[1] == 0 {
-		return head, drop, nil
+		return head, drop, false, nil
 	}
 	methods := make([]byte, head[1])
 	if _, err = io.ReadFull(conn, methods); err != nil {
-		return nil, drop, err
+		return nil, drop, false, err
 	}
 	if bytes.IndexByte(methods, 0) < 0 {
-		return append(head, methods...), drop, nil
+		return append(head, methods...), drop, false, nil
 	}
 	if _, err = conn.Write(socksReplyNoAuth); err != nil {
-		return nil, drop, err
+		return nil, drop, false, err
 	}
 	drop.greeting = true
 	prefix = append([]byte(nil), socksGreetingNoAuth...)
 	if !socksLocalConnect {
-		return prefix, drop, nil
+		return prefix, drop, false, nil
 	}
 	req, err := readSocksRequest(conn)
 	if err != nil {
-		return nil, drop, err
+		return nil, drop, false, err
+	}
+	if req[1] == 3 && socksUDP { // UDP ASSOCIATE
+		return nil, drop, true, nil
 	}
 	prefix = append(prefix, req...)
 	if req[1] == 1 { // CONNECT
 		if _, err = conn.Write(socksReplyConnected); err != nil {
-			return nil, drop, err
+			return nil, drop, false, err
 		}
 		drop.connect = true
 	}
-	return prefix, drop, nil
+	return prefix, drop, false, nil
 }
 
 // readSocksRequest reads VER CMD RSV ATYP ADDR PORT.

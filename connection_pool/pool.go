@@ -22,6 +22,7 @@ const (
 type ConnectionPool struct {
 	connectionMapping   map[uint32]connection.Connection
 	closed              map[uint32]time.Time // recently removed connections, see recvRelay
+	datagrams           map[uint32]*datagramSession
 	mappingLock         sync.RWMutex
 	tunnelPool          *tunnel_pool.TunnelPool
 	sendQueue           chan block.Block
@@ -37,6 +38,7 @@ func NewConnectionPool(pool *tunnel_pool.TunnelPool, acceptNewConnection bool, b
 	cp := &ConnectionPool{
 		connectionMapping:   make(map[uint32]connection.Connection),
 		closed:              make(map[uint32]time.Time),
+		datagrams:           make(map[uint32]*datagramSession),
 		tunnelPool:          pool,
 		sendQueue:           make(chan block.Block, SendQueueSize),
 		acceptNewConnection: acceptNewConnection,
@@ -104,6 +106,10 @@ func (cp *ConnectionPool) recvRelay() {
 	for {
 		select {
 		case blk := <-cp.tunnelPool.GetRecvQueue():
+			if blk.Type == block.TypeDatagram {
+				cp.recvDatagram(blk)
+				continue
+			}
 			connID := blk.ConnectionID
 			var conn connection.Connection
 			var ok bool

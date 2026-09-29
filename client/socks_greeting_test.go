@@ -33,7 +33,7 @@ func talk(t *testing.T, sent []byte, want int) (prefix []byte, drop socksDrop, r
 		n, _ := io.ReadFull(app, buf)
 		got <- buf[:n]
 	}()
-	prefix, drop, err = answerSocks(rabbit)
+	prefix, drop, _, err = answerSocks(rabbit)
 	if err != nil {
 		t.Fatal(err)
 	}
