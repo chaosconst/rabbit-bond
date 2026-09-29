@@ -33,6 +33,10 @@ var (
 	flowSchedSlack = time.Duration(envInt("RABBIT_FLOW_SCHED_SLACK_MS", 20)) * time.Millisecond
 	// RABBIT_FLOW_RATE=ack falls back to the old ack-interval rate sampling.
 	rateSampleByBlock = os.Getenv("RABBIT_FLOW_RATE") != "ack"
+	// RABBIT_FLOW_RATE_WIN_MS > 0: the rate is the average over that sliding window instead of
+	// the maximum short sample. A per-flow policer (token bucket) lets each flow burst well
+	// above its sustained rate; short samples catch the burst and cwnd grows 2-5x too large.
+	flowRateAvgWin = time.Duration(envInt("RABBIT_FLOW_RATE_WIN_MS", 0)) * time.Millisecond
 	// cwnd = gain × max delivery rate × min RTT. 2 assumes the path itself adds no queueing
 	// under load; home Wi-Fi / carrier queues do, so a higher gain may be needed.
 	flowGain = float64(envInt("RABBIT_FLOW_GAIN_PCT", 200)) / 100
@@ -89,7 +93,13 @@ type flowState struct {
 	maxRateAt   time.Time
 	sampleStart time.Time
 	sampleAcked uint64
+	ackHist     []ackPoint // flowRateAvgWin: acks within the window (plus one older as base)
 	cwnd        uint64
+}
+
+type ackPoint struct {
+	t     time.Time
+	acked uint64
 }
 
 func newFlowState() *flowState {
@@ -145,7 +155,27 @@ func (f *flowState) onAck(low uint32) {
 	f.pending = append(f.pending[:0], f.pending[i:]...)
 	f.acked = acked
 
-	if rateSampleByBlock {
+	if flowRateAvgWin > 0 {
+		f.ackHist = append(f.ackHist, ackPoint{now, acked})
+		k := 0
+		for k+1 < len(f.ackHist) && now.Sub(f.ackHist[k+1].t) >= flowRateAvgWin {
+			k++
+		}
+		f.ackHist = f.ackHist[k:]
+		// After an idle gap the base is from before it: bytes over the whole gap would read as a
+		// near-zero rate and keep the scheduler off this tunnel for a window. Start over instead.
+		if now.Sub(f.ackHist[0].t) > 2*flowRateAvgWin {
+			f.ackHist = f.ackHist[len(f.ackHist)-1:]
+		}
+		// Max over flowRateWindow of the window averages: a window where the scheduler fed
+		// this tunnel little must not lower the rate, or it gets fed less and spirals down.
+		if base := f.ackHist[0]; now.Sub(base.t) >= flowRateAvgWin/2 {
+			r := float64(acked-base.acked) / now.Sub(base.t).Seconds()
+			if r > f.maxRate || now.Sub(f.maxRateAt) > flowRateWindow {
+				f.maxRate, f.maxRateAt = r, now
+			}
+		}
+	} else if rateSampleByBlock {
 		if sample > 0 && (sample > f.maxRate || now.Sub(f.maxRateAt) > flowRateWindow) {
 			f.maxRate, f.maxRateAt = sample, now
 		}
