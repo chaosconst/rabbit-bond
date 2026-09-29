@@ -37,6 +37,9 @@ var (
 	// the maximum short sample. A per-flow policer (token bucket) lets each flow burst well
 	// above its sustained rate; short samples catch the burst and cwnd grows 2-5x too large.
 	flowRateAvgWin = time.Duration(envInt("RABBIT_FLOW_RATE_WIN_MS", 0)) * time.Millisecond
+	// RABBIT_FLOW_BASERTT_WIN_S > 0: scheduling uses a windowed unloaded RTT (see baseRTT) instead
+	// of the lifetime minimum, which stays at the best route ever seen after the route changes.
+	flowBaseRTTWin = time.Duration(envInt("RABBIT_FLOW_BASERTT_WIN_S", 0)) * time.Second
 	// cwnd = gain × max delivery rate × min RTT. 2 assumes the path itself adds no queueing
 	// under load; home Wi-Fi / carrier queues do, so a higher gain may be needed.
 	flowGain = float64(envInt("RABBIT_FLOW_GAIN_PCT", 200)) / 100
@@ -73,6 +76,7 @@ type pendingBlock struct {
 	sentAt     time.Time
 	ackedAt    uint64 // f.acked when this block was sent (delivery-rate sample base)
 	blk        block.Block
+	solo       bool // sent to an empty tunnel: its RTT has no queue of this tunnel in it
 	reinjected bool
 	nacked     bool // already re-sent for a NACK
 }
@@ -95,8 +99,14 @@ type flowState struct {
 	maxRateAt   time.Time
 	sampleStart time.Time
 	sampleAcked uint64
-	ackHist     []ackPoint
-	lastNack    time.Time // last NACKed hole this tunnel held // flowRateAvgWin: acks within the window (plus one older as base)
+	ackHist     []ackPoint // flowRateAvgWin: acks within the window (plus one older as base)
+	lastNack    time.Time  // last NACKed hole this tunnel held
+	// baseRTT is what scheduling uses: the minimum over flowBaseRTTWin of RTTs of blocks sent to an
+	// empty tunnel (no own queue), so it follows route changes (e.g. night 50 ms, day 110 ms).
+	// cwnd keeps the lifetime minRTT: sized from a windowed value it would ratchet up with its own queue.
+	baseRTT     time.Duration
+	baseRTTAt   time.Time
+	baseRTTCand time.Duration // minimum unloaded sample since baseRTTAt
 	cwnd        uint64
 }
 
@@ -124,7 +134,8 @@ func (f *flowState) canSend() bool {
 func (f *flowState) onSent(blk block.Block, size int) {
 	f.mu.Lock()
 	f.sent += uint64(size)
-	f.pending = append(f.pending, pendingBlock{end: f.sent, sentAt: time.Now(), ackedAt: f.acked, blk: blk})
+	solo := len(f.pending) == 0
+	f.pending = append(f.pending, pendingBlock{end: f.sent, sentAt: time.Now(), ackedAt: f.acked, blk: blk, solo: solo})
 	f.mu.Unlock()
 }
 
@@ -148,6 +159,9 @@ func (f *flowState) onAck(low uint32) {
 		rtt := now.Sub(p.sentAt)
 		if f.minRTT == 0 || rtt < f.minRTT {
 			f.minRTT = rtt
+		}
+		if p.solo {
+			f.noteBaseRTT(rtt, now)
 		}
 		if rateSampleByBlock && rtt >= flowMinSample {
 			if r := float64(acked-p.ackedAt) / rtt.Seconds(); r > sample {
@@ -226,8 +240,27 @@ func (f *flowState) stats() (cwnd, inflight uint64, rate float64, rtt time.Durat
 	return f.cwnd, f.sent - f.acked, f.maxRate, f.minRTT
 }
 
+// noteBaseRTT takes an unloaded RTT sample: a new minimum is used at once; otherwise, once the
+// current value is flowBaseRTTWin old, it is replaced by the minimum seen since.
+func (f *flowState) noteBaseRTT(rtt time.Duration, now time.Time) {
+	if f.baseRTTCand == 0 || rtt < f.baseRTTCand {
+		f.baseRTTCand = rtt
+	}
+	if f.baseRTT == 0 || rtt < f.baseRTT || (flowBaseRTTWin > 0 && now.Sub(f.baseRTTAt) > flowBaseRTTWin) {
+		f.baseRTT, f.baseRTTAt, f.baseRTTCand = f.baseRTTCand, now, 0
+	}
+}
+
+// schedRTTLocked is the RTT scheduling and stall detection use.
+func (f *flowState) schedRTTLocked() time.Duration {
+	if flowBaseRTTWin > 0 && f.baseRTT > 0 {
+		return f.baseRTT
+	}
+	return f.minRTT
+}
+
 func (f *flowState) stallAfterLocked() time.Duration {
-	d := flowStallRTTs * f.minRTT
+	d := flowStallRTTs * f.schedRTTLocked()
 	if d < flowStallMin {
 		d = flowStallMin
 	}
@@ -242,7 +275,7 @@ func (f *flowState) estimate(size int, now time.Time) (time.Duration, bool) {
 	if len(f.pending) > 0 && now.Sub(f.pending[0].sentAt) > f.stallAfterLocked() {
 		return 0, true
 	}
-	est := f.minRTT
+	est := f.schedRTTLocked()
 	// A stale rate sample (tunnel idle or starved) is ignored, so the tunnel gets
 	// picked again and re-measured instead of being excluded forever.
 	if f.maxRate > 0 && now.Sub(f.maxRateAt) <= flowRateWindow {

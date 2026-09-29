@@ -25,6 +25,7 @@ type Tunnel struct {
 	flow     *flowState // nil unless FlowControl
 	pool     *TunnelPool
 	endpoint string // client side: which -rabbit-addr endpoint (network path) this tunnel was dialed to
+	created  time.Time
 }
 
 // Create a new tunnel from a net.Conn and cipher with random tunnelID
@@ -46,6 +47,7 @@ func newTunnelWithID(conn net.Conn, ciph tunnel.Cipher, peerID uint32) Tunnel {
 		peerID:   peerID,
 		tunnelID: tunnelID,
 		logger:   logger.NewLogger(fmt.Sprintf("[Tunnel-%d]", tunnelID)),
+		created:  time.Now(),
 	}
 	if FlowControl {
 		tun.flow = newFlowState()

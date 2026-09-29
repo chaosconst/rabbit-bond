@@ -24,6 +24,8 @@ type ClientManager struct {
 	peerID             uint32
 	cipher             tunnel.Cipher
 	logger             *logger.Logger
+	auto               *autoScaler // RABBIT_AUTO_TUNNELS=1
+	autoOnce           sync.Once
 }
 
 func NewClientManager(tunnelNum int, endpoint string, peerID uint32, cipher tunnel.Cipher) ClientManager {
@@ -36,8 +38,16 @@ func NewClientManager(tunnelNum int, endpoint string, peerID uint32, cipher tunn
 	}
 }
 
-// Keep tunnelPool size above tunnelNum
+// Keep tunnelPool size above tunnelNum (or, with RABBIT_AUTO_TUNNELS, each endpoint at its target)
 func (cm *ClientManager) DecreaseNotify(pool *TunnelPool) {
+	if autoTunnels && FlowControl {
+		cm.autoOnce.Do(func() {
+			cm.auto = newAutoScaler(cm.endpoint, cm.logger.Infof)
+			go cm.auto.run(cm, pool)
+		})
+		cm.autoDial(pool)
+		return
+	}
 	cm.decreaseNotifyLock.Lock()
 	defer cm.decreaseNotifyLock.Unlock()
 	tunnelCount := len(pool.tunnelMapping)
@@ -69,6 +79,59 @@ func (cm *ClientManager) DecreaseNotify(pool *TunnelPool) {
 		tunnelToCreate--
 		cm.logger.Infof("Successfully dialed to %s. TunnelToCreate: %d\n", endpoint, tunnelToCreate)
 	}
+}
+
+// autoDial opens what the auto scaler asks for; a round already dialing makes this a no-op.
+func (cm *ClientManager) autoDial(pool *TunnelPool) {
+	if !cm.decreaseNotifyLock.TryLock() {
+		return
+	}
+	defer cm.decreaseNotifyLock.Unlock()
+	for {
+		select {
+		case <-pool.ctx.Done():
+			return
+		default:
+		}
+		count := map[string]int{}
+		pool.mutex.Lock()
+		for _, t := range pool.tunnelMapping {
+			count[t.endpoint]++
+		}
+		pool.mutex.Unlock()
+		want := cm.auto.want(count)
+		if len(want) == 0 {
+			return
+		}
+		var wg sync.WaitGroup
+		for ep, n := range want {
+			for i := 0; i < n; i++ {
+				wg.Add(1)
+				go func(ep string) {
+					defer wg.Done()
+					cm.dialOne(pool, ep)
+				}(ep)
+			}
+		}
+		wg.Wait()
+	}
+}
+
+func (cm *ClientManager) dialOne(pool *TunnelPool, endpoint string) {
+	conn, err := net.Dial("tcp", endpoint)
+	if err != nil {
+		cm.logger.Errorf("Error when dial to %s: %v.\n", endpoint, err)
+		time.Sleep(ErrorWaitSec * time.Second)
+		return
+	}
+	tun, err := NewActiveTunnel(conn, cm.cipher, cm.peerID)
+	if err != nil {
+		cm.logger.Errorf("Error when create active tunnel: %v\n", err)
+		time.Sleep(ErrorWaitSec * time.Second)
+		return
+	}
+	tun.endpoint = endpoint
+	pool.AddTunnel(&tun)
 }
 
 func (cm *ClientManager) Notify(pool *TunnelPool) {}
