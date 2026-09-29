@@ -40,6 +40,10 @@ type tunnelStat struct {
 	RateMbps float64 `json:"rate_mbps"`
 	MinRTTms float64 `json:"min_rtt_ms"`
 	SchedRTT float64 `json:"sched_rtt_ms"`
+	Nacks    uint64  `json:"nacks"`
+	LateP    float64 `json:"late_p"`
+	LateByMs float64 `json:"late_by_ms"`
+	Lates    uint64  `json:"lates"`
 	Stuck    bool    `json:"stuck"`
 }
 
@@ -57,11 +61,13 @@ func init() {
 				}
 				cwnd, inflight, rate, rtt := t.flow.stats()
 				t.flow.mu.Lock()
-				sent, acked, srtt := t.flow.sent, t.flow.acked, t.flow.schedRTTLocked()
+				sent, acked, srtt, nacks := t.flow.sent, t.flow.acked, t.flow.schedRTTLocked(), t.flow.nacks
+				lateP, lateBy, lates := t.flow.latePLocked(time.Now()), t.flow.lateBy, t.flow.lates
 				t.flow.mu.Unlock()
 				_, stuck := t.flow.estimate(0, time.Now())
 				ts = append(ts, tunnelStat{t.tunnelID, t.endpoint, t.flow.recv, sent, acked, cwnd, inflight,
-					rate * 8 / 1e6, float64(rtt.Microseconds()) / 1000, float64(srtt.Microseconds()) / 1000, stuck})
+					rate * 8 / 1e6, float64(rtt.Microseconds()) / 1000, float64(srtt.Microseconds()) / 1000, nacks,
+					lateP, float64(lateBy.Microseconds()) / 1000, lates, stuck})
 			}
 			tp.mutex.Unlock()
 			peers = append(peers, map[string]interface{}{"peer": tp.peerID, "tunnels": ts})

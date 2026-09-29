@@ -1,6 +1,7 @@
 package tunnel_pool
 
 import (
+	"math"
 	"os"
 	"strconv"
 	"sync"
@@ -43,6 +44,18 @@ var (
 	// cwnd = gain × max delivery rate × min RTT. 2 assumes the path itself adds no queueing
 	// under load; home Wi-Fi / carrier queues do, so a higher gain may be needed.
 	flowGain = float64(envInt("RABBIT_FLOW_GAIN_PCT", 200)) / 100
+	// RABBIT_FLOW_LATE_MS > 0: a block acked more than this after its expected delivery is "late"
+	// (on a TCP tunnel that is almost always a loss recovered by retransmission timeout, which the
+	// receiver cannot NACK when nothing follows the lost block). Each tunnel keeps its late rate p
+	// and mean lateness; the expected delivery gets p × lateness added, so a tunnel that loses more
+	// is chosen less. The rate decays toward 0 with flowLateHalfLife so a tunnel is not shunned for
+	// one bad minute forever.
+	flowLateAfter = time.Duration(envInt("RABBIT_FLOW_LATE_MS", 0)) * time.Millisecond
+	// RABBIT_FLOW_SCHED_QUEUE=1: the scheduling allowance (SCHED_PCT) applies to the best tunnel's
+	// queue only, not to its RTT. With the allowance on the whole estimate, an idle pool (no queues)
+	// let every tunnel within 3x the best RTT take a block, so small requests went to any tunnel;
+	// now they go to the earliest one, while under load (queues) the allowance is as wide as before.
+	flowSchedQueue = os.Getenv("RABBIT_FLOW_SCHED_QUEUE") == "1"
 )
 
 func envInt(name string, def int) int {
@@ -60,6 +73,8 @@ const (
 	flowMinSample  = 10 * time.Millisecond
 	// A second NACKed hole on the same tunnel within this window re-sends all it holds.
 	flowNackBulkWindow = time.Second
+	flowLateHalfLife   = time.Minute
+	flowLateGain       = 1.0 / 32 // late rate: moving average over ~32 blocks
 
 	// Scheduling: a tunnel may take the next block only if it is expected to deliver
 	// it no later than the best tunnel would (within this slack), so slow or
@@ -79,7 +94,8 @@ type pendingBlock struct {
 	blk        block.Block
 	solo       bool // sent to an empty tunnel: its RTT has no queue of this tunnel in it
 	reinjected bool
-	nacked     bool // already re-sent for a NACK
+	nacked     bool          // already re-sent for a NACK
+	expect     time.Duration // expected delivery when sent (flowLateAfter)
 }
 
 type flowState struct {
@@ -102,6 +118,7 @@ type flowState struct {
 	sampleAcked uint64
 	ackHist     []ackPoint // flowRateAvgWin: acks within the window (plus one older as base)
 	lastNack    time.Time  // last NACKed hole this tunnel held
+	nacks       uint64     // NACKed holes this tunnel held (for /debug/flow)
 	// baseRTT is what scheduling uses: the minimum over flowBaseRTTWin of RTTs of blocks sent to an
 	// empty tunnel (no own queue), so it follows route changes (e.g. night 50 ms, day 110 ms).
 	// cwnd keeps the lifetime minRTT: sized from a windowed value it would ratchet up with its own queue.
@@ -109,6 +126,10 @@ type flowState struct {
 	baseRTTAt   time.Time
 	baseRTTCand time.Duration // minimum unloaded sample since baseRTTAt
 	cwnd        uint64
+	lateP       float64 // late-block rate, as of lateAt (decays with flowLateHalfLife)
+	lateAt      time.Time
+	lateBy      time.Duration // mean lateness of late blocks (beyond their expected delivery)
+	lates       uint64        // late blocks (for /debug/flow)
 }
 
 type ackPoint struct {
@@ -134,9 +155,14 @@ func (f *flowState) canSend() bool {
 
 func (f *flowState) onSent(blk block.Block, size int) {
 	f.mu.Lock()
+	now := time.Now()
+	var expect time.Duration
+	if flowLateAfter > 0 {
+		expect = f.schedRTTLocked() + f.queueLocked(size, now)
+	}
 	f.sent += uint64(size)
 	solo := len(f.pending) == 0
-	f.pending = append(f.pending, pendingBlock{end: f.sent, sentAt: time.Now(), ackedAt: f.acked, blk: blk, solo: solo})
+	f.pending = append(f.pending, pendingBlock{end: f.sent, sentAt: now, ackedAt: f.acked, blk: blk, solo: solo, expect: expect})
 	f.mu.Unlock()
 }
 
@@ -163,6 +189,9 @@ func (f *flowState) onAck(low uint32) {
 		}
 		if p.solo {
 			f.noteBaseRTT(rtt, now)
+		}
+		if flowLateAfter > 0 && p.expect > 0 {
+			f.noteLate(rtt-p.expect, now)
 		}
 		if rateSampleByBlock && rtt >= flowMinSample {
 			if r := float64(acked-p.ackedAt) / rtt.Seconds(); r > sample {
@@ -252,6 +281,30 @@ func (f *flowState) noteBaseRTT(rtt time.Duration, now time.Time) {
 	}
 }
 
+// noteLate takes one delivered block's lateness (actual minus expected delivery).
+func (f *flowState) noteLate(by time.Duration, now time.Time) {
+	p := f.latePLocked(now)
+	if by > flowLateAfter {
+		p += (1 - p) * flowLateGain
+		if f.lateBy == 0 {
+			f.lateBy = by
+		} else {
+			f.lateBy += (by - f.lateBy) / 4
+		}
+		f.lates++
+	} else {
+		p -= p * flowLateGain
+	}
+	f.lateP, f.lateAt = p, now
+}
+
+func (f *flowState) latePLocked(now time.Time) float64 {
+	if f.lateP == 0 {
+		return 0
+	}
+	return f.lateP * math.Exp2(-float64(now.Sub(f.lateAt))/float64(flowLateHalfLife))
+}
+
 // schedRTTLocked is the RTT scheduling and stall detection use.
 func (f *flowState) schedRTTLocked() time.Duration {
 	if flowBaseRTTWin > 0 && f.baseRTT > 0 {
@@ -271,23 +324,38 @@ func (f *flowState) stallAfterLocked() time.Duration {
 // estimate returns the expected time for a block of size bytes sent now to be
 // delivered, and whether the tunnel currently looks stuck.
 func (f *flowState) estimate(size int, now time.Time) (time.Duration, bool) {
+	est, _, stuck := f.estimateParts(size, now)
+	return est, stuck
+}
+
+// estimateParts also returns the queueing part of the estimate.
+func (f *flowState) estimateParts(size int, now time.Time) (est, queue time.Duration, stuck bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.pending) > 0 && now.Sub(f.pending[0].sentAt) > f.stallAfterLocked() {
-		return 0, true
+		return 0, 0, true
 	}
-	est := f.schedRTTLocked()
+	queue = f.queueLocked(size, now)
+	est = f.schedRTTLocked() + queue
+	if flowLateAfter > 0 {
+		est += time.Duration(f.latePLocked(now) * float64(f.lateBy))
+	}
+	return est, queue, false
+}
+
+// queueLocked is the time to deliver what is in flight plus size bytes at the measured rate.
+func (f *flowState) queueLocked(size int, now time.Time) time.Duration {
 	// A stale rate sample (tunnel idle or starved) is ignored, so the tunnel gets
 	// picked again and re-measured instead of being excluded forever.
 	if f.maxRate > 0 && now.Sub(f.maxRateAt) <= flowRateWindow {
-		est += time.Duration(float64(f.sent-f.acked+uint64(size)) / f.maxRate * float64(time.Second))
+		return time.Duration(float64(f.sent-f.acked+uint64(size)) / f.maxRate * float64(time.Second))
 	} else if f.maxRate == 0 {
 		// A new tunnel has no rate yet and is in TCP slow start: counted as queue-free it looked
 		// like the fastest path and got a whole window at once, which it needs seconds to deliver
 		// (holes, stalls). Assume a modest rate until it is measured.
-		est += time.Duration(float64(f.sent-f.acked+uint64(size)) / flowFreshRate * float64(time.Second))
+		return time.Duration(float64(f.sent-f.acked+uint64(size)) / flowFreshRate * float64(time.Second))
 	}
-	return est, false
+	return 0
 }
 
 // stuckBlocks returns pending blocks that have waited too long and marks them,
@@ -334,6 +402,7 @@ func (f *flowState) nackPending(connID, blockID uint32) []block.Block {
 	}
 	if len(out) > 0 {
 		f.lastNack = now
+		f.nacks++
 	}
 	return out
 }

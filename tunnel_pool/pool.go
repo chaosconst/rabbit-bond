@@ -52,21 +52,24 @@ func (tp *TunnelPool) schedulable(t *Tunnel) bool {
 		return true
 	}
 	now := time.Now()
-	mine, stuck := t.flow.estimate(block.MaxSize, now)
+	mine, mineQueue, stuck := t.flow.estimateParts(block.MaxSize, now)
 	if stuck {
 		return false
 	}
-	best := mine
+	best, bestQueue := mine, mineQueue
 	tp.mutex.Lock()
 	for _, other := range tp.tunnelMapping {
 		if other == t || other.flow == nil {
 			continue
 		}
-		if est, stuck := other.flow.estimate(block.MaxSize, now); !stuck && est < best {
-			best = est
+		if est, queue, stuck := other.flow.estimateParts(block.MaxSize, now); !stuck && est < best {
+			best, bestQueue = est, queue
 		}
 	}
 	tp.mutex.Unlock()
+	if flowSchedQueue {
+		return float64(mine) <= float64(best)+float64(bestQueue)*(flowSchedRatio-1)+float64(flowSchedSlack)
+	}
 	return float64(mine) <= float64(best)*flowSchedRatio+float64(flowSchedSlack)
 }
 

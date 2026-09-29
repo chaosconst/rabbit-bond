@@ -41,16 +41,42 @@ func (c *Client) ServeForward(listen, dest string) error {
 		}
 		go func() {
 			c.logger.Infoln("Accepted a connection.")
+			var prefix []byte
+			var drop socksDrop
+			if socksLocalGreeting {
+				var err error
+				if prefix, drop, err = answerSocks(conn); err != nil {
+					_ = conn.Close()
+					return
+				}
+			}
 			connProxy := c.Dial(dest)
-			biRelay(conn.(*net.TCPConn), connProxy, c.logger)
+			if len(prefix) > 0 {
+				if _, err := connProxy.Write(prefix); err != nil {
+					_ = conn.Close()
+					_ = connProxy.Close()
+					return
+				}
+			}
+			biRelay(conn.(*net.TCPConn), connProxy, c.logger, drop)
 		}()
 	}
 }
 
-func biRelay(left, right connection.HalfOpenConn, logger *logger.Logger) {
+// biRelay relays both ways; the far SOCKS answers in drop are discarded first (see socks_greeting.go).
+func biRelay(left, right connection.HalfOpenConn, logger *logger.Logger, drop socksDrop) {
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go relay(left, right, &wg, logger, "local <- tunnel")
+	go func() {
+		if !dropSocksReplies(right, drop) {
+			logger.Infof("Far SOCKS server refused; closing.\n")
+			_ = left.Close()
+			_ = right.Close()
+			wg.Done()
+			return
+		}
+		relay(left, right, &wg, logger, "local <- tunnel")
+	}()
 	wg.Add(1)
 	go relay(right, left, &wg, logger, "local -> tunnel")
 	wg.Wait()

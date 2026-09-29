@@ -5,6 +5,7 @@ import (
 	"github.com/ihciah/rabbit-tcp/logger"
 	"github.com/ihciah/rabbit-tcp/tunnel"
 	"go.uber.org/atomic"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ type ClientManager struct {
 	logger             *logger.Logger
 	auto               *autoScaler // RABBIT_AUTO_TUNNELS=1
 	autoOnce           sync.Once
+	failedAt           map[string]time.Time // endpoint -> last failed dial (fixed mode; under decreaseNotifyLock)
 }
 
 func NewClientManager(tunnelNum int, endpoint string, peerID uint32, cipher tunnel.Cipher) ClientManager {
@@ -62,16 +64,20 @@ func (cm *ClientManager) DecreaseNotify(pool *TunnelPool) {
 
 		cm.logger.Infof("Need %d new tunnels now.\n", tunnelToCreate)
 		endpoint := cm.pickEndpoint(pool)
+		if endpoint == "" { // every endpoint failed just now
+			time.Sleep(ErrorWaitSec * time.Second)
+			continue
+		}
 		conn, err := net.Dial("tcp", endpoint)
 		if err != nil {
 			cm.logger.Errorf("Error when dial to %s: %v.\n", endpoint, err)
-			time.Sleep(ErrorWaitSec * time.Second)
+			cm.dialFailed(endpoint)
 			continue
 		}
 		tun, err := NewActiveTunnel(conn, cm.cipher, cm.peerID)
 		if err != nil {
 			cm.logger.Errorf("Error when create active tunnel: %v\n", err)
-			time.Sleep(ErrorWaitSec * time.Second)
+			cm.dialFailed(endpoint)
 			continue
 		}
 		tun.endpoint = endpoint
@@ -131,6 +137,23 @@ func (cm *ClientManager) Notify(pool *TunnelPool) {}
 // pickEndpoint spreads tunnels over several endpoints (one per network path).
 // -rabbit-addr accepts "host:port*weight,host:port*weight"; a new tunnel goes to the
 // endpoint with the lowest (tunnels+1)/weight, so a path that lost tunnels is refilled first.
+// dialFailed takes an endpoint out of pickEndpoint for dialBackoff. Without it a dead endpoint
+// (5G unplugged) stays the most under-filled one and is picked again and again, so the pool never
+// refills the live paths (seen: 2 of 16 tunnels after a restart with 5G off).
+func (cm *ClientManager) dialFailed(endpoint string) {
+	if cm.failedAt == nil {
+		cm.failedAt = map[string]time.Time{}
+	}
+	cm.failedAt[endpoint] = time.Now()
+	if len(strings.Split(cm.endpoint, ",")) == 1 {
+		time.Sleep(ErrorWaitSec * time.Second)
+	}
+}
+
+const dialBackoff = 10 * time.Second
+
+// pickEndpoint returns the endpoint furthest below its weighted share, skipping endpoints whose
+// dial failed within dialBackoff; "" if all of them did.
 func (cm *ClientManager) pickEndpoint(pool *TunnelPool) string {
 	parts := strings.Split(cm.endpoint, ",")
 	if len(parts) == 1 {
@@ -142,14 +165,27 @@ func (cm *ClientManager) pickEndpoint(pool *TunnelPool) string {
 		count[t.endpoint]++
 	}
 	pool.mutex.Unlock()
-	best, bestScore := "", 0.0
-	for _, p := range parts {
-		addr, w := p, 1.0
-		if i := strings.Index(p, "*"); i >= 0 {
-			addr = p[:i]
-			if v, err := strconv.ParseFloat(p[i+1:], 64); err == nil && v > 0 {
-				w = v
+	addrs, weights, sum := make([]string, len(parts)), make([]float64, len(parts)), 0.0
+	for i, p := range parts {
+		addrs[i], weights[i] = p, 1.0
+		if j := strings.Index(p, "*"); j >= 0 {
+			addrs[i] = p[:j]
+			if v, err := strconv.ParseFloat(p[j+1:], 64); err == nil && v > 0 {
+				weights[i] = v
 			}
+		}
+		sum += weights[i]
+	}
+	best, bestScore := "", 0.0
+	for i, addr := range addrs {
+		w := weights[i]
+		// Each endpoint is capped at its share of -tunnelN (8/4/4): a dead path's share is not
+		// handed to the others, it is re-dialed after dialBackoff and filled when it comes back.
+		if float64(count[addr]) >= math.Round(float64(cm.tunnelNum)*w/sum) {
+			continue
+		}
+		if time.Since(cm.failedAt[addr]) < dialBackoff {
+			continue
 		}
 		if score := float64(count[addr]+1) / w; best == "" || score < bestScore {
 			best, bestScore = addr, score
