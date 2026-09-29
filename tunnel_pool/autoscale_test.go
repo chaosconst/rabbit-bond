@@ -1,6 +1,7 @@
 package tunnel_pool
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -107,5 +108,17 @@ func TestAutoScaleAppLimitedStaysSmall(t *testing.T) {
 	s.run(60*time.Second, 120) // e.g. a video: 120 Mbit/s, more tunnels bring nothing
 	if c := s.counts(); c["home"] > 8 || c["g5"] > 8 {
 		t.Fatalf("grew without gain: %v", c)
+	}
+}
+
+func TestAutoScaleDoesNotProbeDuringRampUp(t *testing.T) {
+	var logs []string
+	s := &sim{t: t, now: time.Unix(0, 0),
+		paths: map[string]simPath{"home": {35, 520, 20}, "g5": {30, 260, 12}},
+		a:     newAutoScaler("home,g5", func(f string, v ...interface{}) { logs = append(logs, fmt.Sprintf(f, v...)) })}
+	s.run(10*time.Second, 0)    // idle, then a transfer starts
+	s.run(8*time.Second, 10000) // the first windows still contain the idle part
+	for _, l := range logs {
+		t.Fatalf("decided before the load was steady: %s", l)
 	}
 }

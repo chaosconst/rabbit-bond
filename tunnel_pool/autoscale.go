@@ -59,6 +59,7 @@ type autoScaler struct {
 	seen    map[uint32]uint64 // tunnel -> recv already counted
 	total   uint64            // cumulative bytes received over all tunnels, ever
 	history []autoPoint
+	busyFor time.Time // start of the current busy stretch (zero when not busy)
 	logf    func(string, ...interface{})
 }
 
@@ -160,6 +161,14 @@ func (a *autoScaler) step(now time.Time, tunnels []*Tunnel) map[string]int {
 			p.lastBusy = now
 		}
 	}
+	if !busy {
+		a.busyFor = time.Time{}
+	} else if a.busyFor.IsZero() {
+		a.busyFor = now
+	}
+	// A probe compares the rate before and after a step, so "before" must be a window of steady
+	// load, not the start of a transfer that is still ramping up.
+	steady := busy && now.Sub(a.busyFor) >= 2*autoWindow
 
 	if pr := a.probe; pr != nil {
 		p := a.paths[pr.ep]
@@ -198,8 +207,8 @@ func (a *autoScaler) step(now time.Time, tunnels []*Tunnel) map[string]int {
 		}
 		for _, ep := range a.order {
 			p := a.paths[ep]
-			if count[ep] < p.target {
-				break // wait until all are up before measuring anything
+			if count[ep] < p.target || !steady {
+				break // wait until all are up and the load is steady before measuring anything
 			}
 			if p.plateau == 0 && p.target < autoMax {
 				a.probe = &autoProbe{ep: ep, before: p.target, rateBefore: rate, doubling: true}
