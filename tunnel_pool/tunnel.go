@@ -127,7 +127,17 @@ func (tunnel *Tunnel) OutboundRelay(normalQueue, retryQueue chan block.Block) {
 			return
 		default:
 		}
-		if tunnel.flow != nil && !tunnel.waitWindow() {
+		// Re-sends (NACKed holes, blocks of a dead tunnel) jump the window: every tunnel is
+		// usually window-full, and a hole blocks the whole stream until its block arrives.
+		if tunnel.flow != nil {
+			select {
+			case blk := <-retryQueue:
+				tunnel.packThenSend(blk, retryQueue)
+				continue
+			default:
+			}
+		}
+		if tunnel.flow != nil && !tunnel.waitWindowOrRetry(retryQueue) {
 			return
 		}
 		// retryQueue is of secondary highest priority
@@ -257,6 +267,32 @@ func (tunnel *Tunnel) sendAck() {
 		tunnel.logger.Warnf("Error when send ack to tunnel: %v.\n", err)
 		tunnel.closeThenCancel()
 	}
+}
+
+// waitWindowOrRetry is waitWindow, but also returns early when a re-send is queued
+// (the caller then sends it regardless of window).
+func (tunnel *Tunnel) waitWindowOrRetry(retryQueue chan block.Block) bool {
+	timer := time.NewTimer(flowPollEvery)
+	defer timer.Stop()
+	for !tunnel.flow.canSend() || !tunnel.pool.schedulable(tunnel) {
+		if len(retryQueue) > 0 {
+			return true
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(flowPollEvery)
+		select {
+		case <-tunnel.flow.ackCh:
+		case <-timer.C:
+		case <-tunnel.ctx.Done():
+			return false
+		}
+	}
+	return true
 }
 
 // waitWindow blocks until this tunnel has window and is a good choice for the next
