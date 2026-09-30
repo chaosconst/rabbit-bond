@@ -23,6 +23,8 @@ Beijing to Tokyo, over 2000 km across the sea (2093 km straight line): **one TCP
 - The far end: the target's own speed. Put the server next to the target, and everything in between is rabbit's.
 - The middle: crossing seas, detours, loss, jitter, a path suddenly dropping out. All of it is rabbit's job.
 
+Typical use: faster access to your own servers abroad, such as cross-border data sync, remote development, games and video calls.
+
 Measured (2026-09-28 to 09-30):
 
 - One connection peaked at **831 Mbit/s** (average after the first 2 s of ramp-up; 795 Mbit/s over the full 20 s).
@@ -55,7 +57,7 @@ Caveats: failover costs a 1–2 s dip; long-running high-speed transfers have no
 
 ### Example
 
-Local ports 12455, 12456 and 12457 are each a TCP channel to the server's `:9891` (direct, phone hotspot, via a relay, anything). The first two leave through the same exit:
+Speeding up SSH to your own server. Local ports 12455, 12456 and 12457 are each a TCP channel to the server's `:9891` (direct, phone hotspot, via a relay, anything). The first two leave through the same exit:
 
 ```sh
 # server
@@ -67,13 +69,15 @@ rabbit -mode s -flow -password "$PASSWORD" -rabbit-addr :9891
 export RABBIT_CIPHER=AES-128-GCM RABBIT_FLOW_LATE_MS=300 RABBIT_FLOW_SCHED_QUEUE=1
 export RABBIT_FLOW_DUP_FIRST=6 RABBIT_FLOW_DUP_DGRAM=600
 export RABBIT_FLOW_LINES="127.0.0.1:12455=a,127.0.0.1:12456=a,127.0.0.1:12457=b"
-export RABBIT_SOCKS_LOCAL_CONNECT=1 RABBIT_SOCKS_UDP=1
 rabbit -mode c -flow -password "$PASSWORD" -tunnelN 16 \
   -rabbit-addr "127.0.0.1:12455*2,127.0.0.1:12456*1,127.0.0.1:12457*1" \
-  -listen 127.0.0.1:1080 -dest 127.0.0.1:1081   # dest: a socks5 service on the server side
+  -listen 127.0.0.1:2222 -dest 127.0.0.1:22   # dest: the service to speed up, on the server side
+
+# use it
+rsync -e "ssh -p 2222" -a ./data/ user@127.0.0.1:/srv/data/
 ```
 
-Point applications at `socks5://127.0.0.1:1080`. Live state (per-tunnel rate, RTT, duplication counters) is at `/debug/flow` on the address given by `RABBIT_PPROF`.
+Put any service's address in `-dest` to speed up that service. The client can also be a socks5 entry for both TCP and UDP (`RABBIT_SOCKS_LOCAL_CONNECT=1`, `RABBIT_SOCKS_UDP=1`); `-dest` is then a socks5 service on the server side. Live state (per-tunnel rate, RTT, duplication counters) is at `/debug/flow` on the address given by `RABBIT_PPROF`.
 
 ---
 

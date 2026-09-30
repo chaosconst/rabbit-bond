@@ -23,6 +23,8 @@ $ curl --http1.1 -x socks5h://127.0.0.1:16337 -o /dev/null https://speedtest.tok
 - 那一端：目标自己的速度。服务器放在目标旁边，中间就全归 rabbit 管。
 - 中间：跨海、绕路、丢包、抖动、某条路突然断掉，全部交给 rabbit。
 
+典型用途：加速访问你自己的海外服务器，比如跨境数据同步、远程开发、游戏和视频会议。
+
 实测（2026-09-28 至 09-30）：
 
 - 单连接最高 **831 Mbit/s**（去掉起步 2 秒后的平均；含起步的 20 秒平均 795 Mbit/s）。
@@ -55,7 +57,7 @@ $ curl --http1.1 -x socks5h://127.0.0.1:16337 -o /dev/null https://speedtest.tok
 
 ### 用法示例
 
-本地 12455、12456、12457 各是一条通往服务器 `:9891` 的 TCP 通道（直连、手机热点、经中转都行），前两条从同一个出口出去：
+加速访问你自己的服务器上的 SSH。本地 12455、12456、12457 各是一条通往服务器 `:9891` 的 TCP 通道（直连、手机热点、经中转都行），前两条从同一个出口出去：
 
 ```sh
 # 服务端
@@ -67,13 +69,15 @@ rabbit -mode s -flow -password "$PASSWORD" -rabbit-addr :9891
 export RABBIT_CIPHER=AES-128-GCM RABBIT_FLOW_LATE_MS=300 RABBIT_FLOW_SCHED_QUEUE=1
 export RABBIT_FLOW_DUP_FIRST=6 RABBIT_FLOW_DUP_DGRAM=600
 export RABBIT_FLOW_LINES="127.0.0.1:12455=a,127.0.0.1:12456=a,127.0.0.1:12457=b"
-export RABBIT_SOCKS_LOCAL_CONNECT=1 RABBIT_SOCKS_UDP=1
 rabbit -mode c -flow -password "$PASSWORD" -tunnelN 16 \
   -rabbit-addr "127.0.0.1:12455*2,127.0.0.1:12456*1,127.0.0.1:12457*1" \
-  -listen 127.0.0.1:1080 -dest 127.0.0.1:1081   # dest：服务端一侧的 socks5 服务
+  -listen 127.0.0.1:2222 -dest 127.0.0.1:22   # dest：服务端一侧要加速的服务
+
+# 使用
+rsync -e "ssh -p 2222" -a ./data/ user@127.0.0.1:/srv/data/
 ```
 
-应用把 `socks5://127.0.0.1:1080` 设为代理即可。运行状态（每条子连接的速率、RTT、双发计数）见 `RABBIT_PPROF` 指定地址下的 `/debug/flow`。
+`-dest` 换成任何服务的地址，就是加速那个服务。客户端也可以当 socks5 入口，同时支持 TCP 和 UDP（`RABBIT_SOCKS_LOCAL_CONNECT=1`、`RABBIT_SOCKS_UDP=1`），这时 `-dest` 填服务端一侧的 socks5 服务。运行状态（每条子连接的速率、RTT、双发计数）见 `RABBIT_PPROF` 指定地址下的 `/debug/flow`。
 
 ---
 
