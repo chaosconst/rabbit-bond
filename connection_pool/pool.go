@@ -2,10 +2,10 @@ package connection_pool
 
 import (
 	"context"
-	"github.com/ihciah/rabbit-tcp/block"
-	"github.com/ihciah/rabbit-tcp/connection"
-	"github.com/ihciah/rabbit-tcp/logger"
-	"github.com/ihciah/rabbit-tcp/tunnel_pool"
+	"github.com/chaosconst/rabbit-bond/block"
+	"github.com/chaosconst/rabbit-bond/connection"
+	"github.com/chaosconst/rabbit-bond/logger"
+	"github.com/chaosconst/rabbit-bond/tunnel_pool"
 	"sync"
 	"time"
 )

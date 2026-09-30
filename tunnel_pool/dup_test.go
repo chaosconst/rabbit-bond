@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ihciah/rabbit-tcp/block"
+	"github.com/chaosconst/rabbit-bond/block"
 )
 
 func TestDupGoesToAnotherPath(t *testing.T) {

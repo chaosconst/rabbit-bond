@@ -3,7 +3,7 @@ package tunnel_pool
 import (
 	"encoding/json"
 
-	"github.com/ihciah/rabbit-tcp/connection"
+	"github.com/chaosconst/rabbit-bond/connection"
 	"net/http"
 	"sync"
 	"sync/atomic"

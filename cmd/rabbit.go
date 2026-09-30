@@ -3,12 +3,12 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/ihciah/rabbit-tcp/client"
-	"github.com/ihciah/rabbit-tcp/connection"
-	"github.com/ihciah/rabbit-tcp/logger"
-	"github.com/ihciah/rabbit-tcp/server"
-	"github.com/ihciah/rabbit-tcp/tunnel"
-	"github.com/ihciah/rabbit-tcp/tunnel_pool"
+	"github.com/chaosconst/rabbit-bond/client"
+	"github.com/chaosconst/rabbit-bond/connection"
+	"github.com/chaosconst/rabbit-bond/logger"
+	"github.com/chaosconst/rabbit-bond/server"
+	"github.com/chaosconst/rabbit-bond/tunnel"
+	"github.com/chaosconst/rabbit-bond/tunnel_pool"
 	"log"
 	"os"
 	"strconv"
@@ -31,10 +31,10 @@ func parseFlags() (pass bool, mode int, password string, addr string, listen str
 	var printVersion bool
 	flag.StringVar(&modeString, "mode", "c", "running mode(s or c)")
 	flag.StringVar(&password, "password", DefaultPassword, "password")
-	flag.StringVar(&addr, "rabbit-addr", ":443", "listen(server mode) or remote(client mode) address used by rabbit-tcp")
+	flag.StringVar(&addr, "rabbit-addr", ":443", "listen(server mode) or remote(client mode) address used by rabbit-bond")
 	flag.StringVar(&listen, "listen", "", "[Client Only] listen address, eg: 127.0.0.1:2333")
 	flag.StringVar(&dest, "dest", "", "[Client Only] destination address (the service to speed up), eg: 127.0.0.1:22")
-	flag.IntVar(&tunnelN, "tunnelN", 4, "[Client Only] number of tunnels to use in rabbit-tcp")
+	flag.IntVar(&tunnelN, "tunnelN", 4, "[Client Only] number of tunnels to use in rabbit-bond")
 	flag.IntVar(&verbose, "verbose", 2, "verbose level(0~5)")
 	flag.BoolVar(&printVersion, "version", false, "show version")
 	flag.BoolVar(&flowControl, "flow", false, "per-tunnel ack and in-flight limiting for tunnels over paths of different speed (both peers must enable it)")
@@ -44,7 +44,7 @@ func parseFlags() (pass bool, mode int, password string, addr string, listen str
 
 	// version
 	if printVersion {
-		log.Println("Rabbit TCP (https://github.com/ihciah/rabbit-tcp/)")
+		log.Println("Rabbit Bond (https://github.com/chaosconst/rabbit-bond/)")
 		log.Printf("Version: %s.\n", Version)
 		pass = false
 		return

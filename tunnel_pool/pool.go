@@ -2,8 +2,8 @@ package tunnel_pool
 
 import (
 	"context"
-	"github.com/ihciah/rabbit-tcp/block"
-	"github.com/ihciah/rabbit-tcp/logger"
+	"github.com/chaosconst/rabbit-bond/block"
+	"github.com/chaosconst/rabbit-bond/logger"
 	"sync"
 	"sync/atomic"
 	"time"

@@ -3,8 +3,8 @@ package connection
 import (
 	"net"
 
-	"github.com/ihciah/rabbit-tcp/block"
-	"github.com/ihciah/rabbit-tcp/logger"
+	"github.com/chaosconst/rabbit-bond/block"
+	"github.com/chaosconst/rabbit-bond/logger"
 	"go.uber.org/atomic"
 )
 

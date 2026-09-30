@@ -5,7 +5,7 @@ import (
 	"net"
 	"os"
 
-	"github.com/ihciah/rabbit-tcp/connection_pool"
+	"github.com/chaosconst/rabbit-bond/connection_pool"
 )
 
 // RABBIT_SOCKS_UDP=1 (with RABBIT_SOCKS_LOCAL_CONNECT): UDP ASSOCIATE is served here (RFC 1928

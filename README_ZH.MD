@@ -1,12 +1,10 @@
-# Rabbit TCP
+# Rabbit Bond
 
-![Build badge](https://github.com/ihciah/rabbit-tcp/workflows/Build/badge.svg) ![Docker pull badge](https://img.shields.io/docker/pulls/ihciah/rabbit)
-
-一个为加速而生的多连接 TCP 转发器
+把多条路绑成一条连接：多路聚合的 TCP / UDP 转发器
 
 [English](README.MD) | 中文
 
-## flow-control 分支：多条路合成一条连接
+## 多条路合成一条连接
 
 ```console
 $ curl --http1.1 -x socks5h://127.0.0.1:16337 -o /dev/null https://speedtest.tokyo2.linode.com/1GB-tokyo2.bin
@@ -46,7 +44,7 @@ $ curl --http1.1 -x socks5h://127.0.0.1:16337 -o /dev/null https://speedtest.tok
 - **基于 UDP 的隧道加速**：很多网络会对长时间的大流量 UDP 限速。rabbit 的每条路都是普通 TCP，外面还能再套任意传输层（比如 TLS）。
 - **单条代理或中转**：速度和稳定性都系于那一条路，它慢了或断了，连接就跟着慢、跟着断。
 
-### 相对上游改了什么
+### 相对上游（Rabbit TCP）改了什么
 
 - **每条子连接独立确认、独立流控**（`-flow`，两端都要开）：按块采样估带宽，窗口跟各自的速度走，快路不会被慢路拖住。队头出现空洞时用 NACK 补发，卡住的子连接上的块重新排队。
 - **按"最早到达"调度**：估算每条子连接送达这一块的时间，交给最早的那条；经常迟到的路少分（`RABBIT_FLOW_LATE_MS`、`RABBIT_FLOW_SCHED_QUEUE`）。
@@ -91,7 +89,7 @@ rsync -e "ssh -p 2222" -a ./data/ user@127.0.0.1:/srv/data/
 由于使用了多条连接，与多线程下载器类似，本项目可以在不多消耗流量的情况下对连接进行加速（需双边部署）。
 本项目 fork 自 [ihciah/rabbit-tcp](https://github.com/ihciah/rabbit-tcp)，感谢原作者。
 
-![Rabbit TCP](.github/resources/rabbit-tcp.svg)
+![Rabbit Bond](.github/resources/rabbit-tcp.svg)
 
 ## 开始使用
 本项目既可以以独立代理模式工作，也可以内嵌在其他 Golang 代码中提供服务。

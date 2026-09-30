@@ -24,7 +24,7 @@ jobs:
       - name: Get dependencies
         run: |
           mkdir -p ~/go/src/github.com/ihciah
-          ln -s "$(pwd)/../rabbit-tcp" ~/go/src/github.com/ihciah/rabbit-tcp
+          ln -s "$(pwd)/../rabbit-bond" ~/go/src/github.com/chaosconst/rabbit-bond
           go get -v -t -d ./...
 
       - name: Build

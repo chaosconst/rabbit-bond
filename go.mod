@@ -1,4 +1,4 @@
-module github.com/ihciah/rabbit-tcp
+module github.com/chaosconst/rabbit-bond
 
 go 1.13
 

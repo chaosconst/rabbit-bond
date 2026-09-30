@@ -1,12 +1,10 @@
-# Rabbit TCP
+# Rabbit Bond
 
-![Build badge](https://github.com/ihciah/rabbit-tcp/workflows/Build/badge.svg) ![Docker pull badge](https://img.shields.io/docker/pulls/ihciah/rabbit)
-
-A multi-connection TCP forwarder created for accelerating TCP connections
+Many paths bonded into one connection: a multipath TCP / UDP forwarder
 
 English | [中文](README_ZH.MD)
 
-## The flow-control branch: many paths, one connection
+## Many paths, one connection
 
 ```console
 $ curl --http1.1 -x socks5h://127.0.0.1:16337 -o /dev/null https://speedtest.tokyo2.linode.com/1GB-tokyo2.bin
@@ -46,7 +44,7 @@ Caveats: failover costs a 1–2 s dip; long-running high-speed transfers have no
 - **UDP-based tunnel accelerators**: many networks throttle long, heavy UDP flows. Every rabbit path is plain TCP and can be wrapped in any transport (TLS, for example).
 - **A single proxy or relay**: speed and reliability hang on that one path. When it slows down or drops, so does the connection.
 
-### What this branch adds to upstream
+### What it adds to upstream (Rabbit TCP)
 
 - **Per-tunnel acks and flow control** (`-flow`, both peers). Bandwidth is estimated from per-block samples, and each window follows its own path's speed, so fast paths aren't held back by slow ones. Head-of-line holes are repaired with NACKs, and blocks on a stalled tunnel are requeued.
 - **Earliest-arrival scheduling**: each block goes to the tunnel expected to deliver it first. Paths that are often late get less (`RABBIT_FLOW_LATE_MS`, `RABBIT_FLOW_SCHED_QUEUE`).
@@ -91,7 +89,7 @@ All upper connections visible to all users are carried by `N` underlying physica
 Due to the use of multiple connections, similar to the multi-threaded downloader, this project can accelerate the connection without any more traffic consumption (bilateral deployment is required).
 This project is a fork of [ihciah/rabbit-tcp](https://github.com/ihciah/rabbit-tcp). Thanks to the original author.
 
-![Rabbit TCP](.github/resources/rabbit-tcp.svg)
+![Rabbit Bond](.github/resources/rabbit-tcp.svg)
 
 ## Get Started
 This project can work in standalone proxy mode or inline in other Golang code.

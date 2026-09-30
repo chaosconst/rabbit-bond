@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ihciah/rabbit-tcp/block"
+	"github.com/chaosconst/rabbit-bond/block"
 )
 
 // RABBIT_FLOW_DUP_FIRST=N (both ends): the first N blocks of every connection (SOCKS request,

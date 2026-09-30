@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ihciah/rabbit-tcp/block"
-	"github.com/ihciah/rabbit-tcp/tunnel_pool"
+	"github.com/chaosconst/rabbit-bond/block"
+	"github.com/chaosconst/rabbit-bond/tunnel_pool"
 	uatomic "go.uber.org/atomic"
 	"sync/atomic"
 )

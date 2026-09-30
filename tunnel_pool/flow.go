@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ihciah/rabbit-tcp/block"
+	"github.com/chaosconst/rabbit-bond/block"
 )
 
 // FlowControl enables per-tunnel acknowledgement and in-flight limiting.

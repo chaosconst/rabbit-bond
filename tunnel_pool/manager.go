@@ -2,8 +2,8 @@ package tunnel_pool
 
 import (
 	"context"
-	"github.com/ihciah/rabbit-tcp/logger"
-	"github.com/ihciah/rabbit-tcp/tunnel"
+	"github.com/chaosconst/rabbit-bond/logger"
+	"github.com/chaosconst/rabbit-bond/tunnel"
 	"go.uber.org/atomic"
 	"math"
 	"net"
