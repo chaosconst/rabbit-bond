@@ -104,6 +104,7 @@ func (tp *TunnelPool) reinjectLoop() {
 			for _, t := range tunnels {
 				for _, blk := range t.flow.stuckBlocks(now) {
 					atomic.AddUint64(&reinjectCnt, uint64(len(blk.Pack())))
+					atomic.AddUint64(&ResendBytes, blockBytes(blk))
 					select {
 					case tp.sendRetryQueue <- blk:
 					default:
@@ -178,6 +179,7 @@ func (tp *TunnelPool) resendForNack(connID, blockID uint32) {
 	for _, t := range tunnels {
 		if blks := t.flow.nackPending(connID, blockID); len(blks) > 0 {
 			atomic.AddUint64(&NackResent, uint64(len(blks)))
+			addResend(blks)
 			for _, blk := range blks {
 				select {
 				case tp.sendRetryQueue <- blk:

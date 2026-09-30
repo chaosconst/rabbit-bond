@@ -164,6 +164,7 @@ func (tunnel *Tunnel) packThenSend(blk block.Block, retryQueue chan block.Block)
 	if tunnel.send(blk, retryQueue) && tunnel.pool != nil && wantDup(blk) {
 		if other := tunnel.pool.dupTunnel(tunnel); other != nil {
 			atomic.AddUint64(&DupSent, 1)
+			atomic.AddUint64(&DupBytes, blockBytes(blk))
 			go other.send(blk, retryQueue)
 		}
 	}
@@ -180,10 +181,12 @@ func (tunnel *Tunnel) send(blk block.Block, retryQueue chan block.Block) bool {
 	}
 	tunnel.Conn.SetWriteDeadline(time.Now().Add(TunnelBlockTimeoutSec * time.Second))
 	n, err := io.Copy(tunnel.Conn, reader)
+	atomic.AddUint64(&BytesSent, uint64(n))
 	if err != nil || n != int64(len(dataToSend)) {
 		tunnel.logger.Warnf("Error when send bytes to tunnel: (n: %d, error: %v).\n", n, err)
 		// Tunnel down and message has not been fully sent.
 		tunnel.closeThenCancel()
+		atomic.AddUint64(&ResendBytes, blockBytes(blk))
 		go func() {
 			retryQueue <- blk
 		}()
@@ -326,6 +329,7 @@ func (tunnel *Tunnel) requeuePending(retryQueue chan block.Block) {
 		return
 	}
 	tunnel.logger.Infof("Re-queue %d un-acknowledged blocks.\n", len(blocks))
+	addResend(blocks)
 	go func() {
 		for _, blk := range blocks {
 			retryQueue <- blk

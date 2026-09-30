@@ -87,6 +87,10 @@ func init() {
 		out["dgram_queue_drop"] = atomic.LoadUint64(&DatagramQueueDrop)
 		out["dgram_too_old"] = atomic.LoadUint64(&DatagramTooOld)
 		out["nack_sent"] = connection.NackSent.Load()
+		out["bytes_sent"] = atomic.LoadUint64(&BytesSent)
+		out["dup_bytes"] = atomic.LoadUint64(&DupBytes)
+		out["resend_bytes"] = atomic.LoadUint64(&ResendBytes)
+		out["redundancy_pct"] = redundancyPct()
 		json.NewEncoder(w).Encode(out)
 	})
 }
