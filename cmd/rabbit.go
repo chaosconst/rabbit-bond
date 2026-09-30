@@ -33,7 +33,7 @@ func parseFlags() (pass bool, mode int, password string, addr string, listen str
 	flag.StringVar(&password, "password", DefaultPassword, "password")
 	flag.StringVar(&addr, "rabbit-addr", ":443", "listen(server mode) or remote(client mode) address used by rabbit-tcp")
 	flag.StringVar(&listen, "listen", "", "[Client Only] listen address, eg: 127.0.0.1:2333")
-	flag.StringVar(&dest, "dest", "", "[Client Only] destination address, eg: shadowsocks server address")
+	flag.StringVar(&dest, "dest", "", "[Client Only] destination address (the service to speed up), eg: 127.0.0.1:22")
 	flag.IntVar(&tunnelN, "tunnelN", 4, "[Client Only] number of tunnels to use in rabbit-tcp")
 	flag.IntVar(&verbose, "verbose", 2, "verbose level(0~5)")
 	flag.BoolVar(&printVersion, "version", false, "show version")
