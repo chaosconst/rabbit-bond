@@ -297,7 +297,7 @@ func (a *autoScaler) run(cm *ClientManager, pool *TunnelPool) {
 				}
 				sort.Slice(mine, func(i, j int) bool { return mine[i].created.After(mine[j].created) })
 				for i := 0; i < n && i < len(mine); i++ {
-					mine[i].closeThenCancel()
+					mine[i].closeWhy("autoscale")
 				}
 			}
 			go cm.DecreaseNotify(pool)

@@ -20,6 +20,7 @@ type TunnelPool struct {
 	ctx            context.Context
 	cancel         context.CancelFunc // currently useless
 	logger         *logger.Logger
+	dgram          dgramPins
 }
 
 func NewTunnelPool(peerID uint32, manager Manager, peerContext context.Context) *TunnelPool {
@@ -52,7 +53,7 @@ func (tp *TunnelPool) schedulable(t *Tunnel) bool {
 		return true
 	}
 	now := time.Now()
-	mine, mineQueue, stuck := t.flow.estimateParts(block.MaxSize, now)
+	mine, mineQueue, stuck := t.flow.estimateAtLeast(block.MaxSize, flowSchedMinRate, now)
 	if stuck {
 		return false
 	}
@@ -62,7 +63,7 @@ func (tp *TunnelPool) schedulable(t *Tunnel) bool {
 		if other == t || other.flow == nil {
 			continue
 		}
-		if est, queue, stuck := other.flow.estimateParts(block.MaxSize, now); !stuck && est < best {
+		if est, queue, stuck := other.flow.estimateAtLeast(block.MaxSize, flowSchedMinRate, now); !stuck && est < best {
 			best, bestQueue = est, queue
 		}
 	}
@@ -123,12 +124,16 @@ func (tp *TunnelPool) AddTunnel(tunnel *Tunnel) {
 	defer tp.mutex.Unlock()
 
 	tunnel.pool = tp
+	if DatagramPinned() && tunnel.flow != nil {
+		tunnel.dgramQ = make(chan block.Block, dgramQueueSize)
+	}
 	tp.tunnelMapping[tunnel.tunnelID] = tunnel
 	tp.manager.Notify(tp)
 
 	tunnel.ctx, tunnel.cancel = context.WithCancel(tp.ctx)
 	go func() {
 		<-tunnel.ctx.Done()
+		tunnel.noteClose("cancelled") // the pool or peer went away; a recorded reason stays
 		tp.RemoveTunnel(tunnel)
 	}()
 

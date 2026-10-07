@@ -29,6 +29,7 @@ type datagramSession struct {
 	id      uint32
 	seq     uatomic.Uint32
 	deliver func(frame []byte)
+	order   *datagramOrder // nil unless RABBIT_FLOW_DGRAM_HOLD_MS
 	close   func()
 	out     chan block.Block
 	done    chan struct{}
@@ -75,8 +76,12 @@ func (s *datagramSession) clear(seq uint32) {
 }
 
 func newDatagramSession(id uint32, deliver func([]byte)) *datagramSession {
-	return &datagramSession{id: id, deliver: deliver, last: time.Now(),
+	s := &datagramSession{id: id, deliver: deliver, last: time.Now(),
 		out: make(chan block.Block, datagramBacklog), done: make(chan struct{})}
+	if dgramHold > 0 {
+		s.order = newDatagramOrder(deliver)
+	}
+	return s
 }
 
 // Each session queues its outgoing datagrams (datagramBacklog) and one goroutine moves them into
@@ -85,8 +90,10 @@ func newDatagramSession(id uint32, deliver func([]byte)) *datagramSession {
 // the socket.
 const datagramBacklog = 4096
 
+// The sequence number is given when a datagram leaves the backlog, so one dropped there leaves no
+// gap for the receiver to wait on.
 func (cp *ConnectionPool) sendDatagram(s *datagramSession, frame []byte) {
-	blk := block.NewDatagramBlock(s.id, s.seq.Inc()-1, frame)
+	blk := block.NewDatagramBlock(s.id, 0, frame)
 	atomic.AddUint64(&tunnel_pool.DatagramSent, 1)
 	select {
 	case s.out <- blk:
@@ -96,9 +103,23 @@ func (cp *ConnectionPool) sendDatagram(s *datagramSession, frame []byte) {
 }
 
 func (cp *ConnectionPool) pumpDatagrams(s *datagramSession) {
+	if tunnel_pool.DatagramPinned() {
+		for {
+			select {
+			case blk := <-s.out:
+				blk.BlockID = s.seq.Inc() - 1
+				cp.tunnelPool.SendDatagram(blk, s.done)
+			case <-s.done:
+				return
+			case <-cp.ctx.Done():
+				return
+			}
+		}
+	}
 	for {
 		select {
 		case blk := <-s.out:
+			blk.BlockID = s.seq.Inc() - 1
 			select {
 			case cp.sendQueue <- blk:
 			case <-s.done:
@@ -134,6 +155,7 @@ func (cp *ConnectionPool) removeDatagram(id uint32) {
 	delete(cp.datagrams, id)
 	cp.closed[id] = time.Now()
 	cp.mappingLock.Unlock()
+	cp.tunnelPool.ForgetDatagram(id)
 	if ok {
 		close(s.done)
 		if s.close != nil {
@@ -160,7 +182,11 @@ func (cp *ConnectionPool) recvDatagram(blk block.Block) {
 	}
 	if s.fresh(blk.BlockID) {
 		atomic.AddUint64(&tunnel_pool.DatagramRecv, 1)
-		s.deliver(blk.BlockData)
+		if s.order != nil {
+			s.order.push(blk.BlockID, blk.BlockData)
+		} else {
+			s.deliver(blk.BlockData)
+		}
 	}
 }
 

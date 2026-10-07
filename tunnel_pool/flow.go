@@ -32,6 +32,12 @@ var (
 	flowStallRTTs  = time.Duration(envInt("RABBIT_FLOW_STALL_RTTS", 8))
 	flowSchedRatio = float64(envInt("RABBIT_FLOW_SCHED_PCT", 120)) / 100
 	flowSchedSlack = time.Duration(envInt("RABBIT_FLOW_SCHED_SLACK_MS", 20)) * time.Millisecond
+	// RABBIT_FLOW_SCHED_MIN_RATE_KBIT: the delivery rate scheduling and head duplication assume at
+	// least. A tunnel that carried only a few small blocks (a TLS handshake, an idle pool) measures
+	// its rate from them, e.g. 0.01-0.1 Mbit/s, and its estimate for a full block becomes seconds of
+	// "queue": the paths just used look slowest and an idle slow one looks fastest. Bulk transfers
+	// measure real rates far above the floor and are not affected.
+	flowSchedMinRate = float64(envInt("RABBIT_FLOW_SCHED_MIN_RATE_KBIT", 8000)) * 1000 / 8 // bytes/s
 	// RABBIT_FLOW_RATE=ack falls back to the old ack-interval rate sampling.
 	rateSampleByBlock = os.Getenv("RABBIT_FLOW_RATE") != "ack"
 	// RABBIT_FLOW_RATE_WIN_MS > 0: the rate is the average over that sliding window instead of
@@ -110,9 +116,18 @@ type flowState struct {
 	sent    uint64
 	acked   uint64
 	pending []pendingBlock
-	ackCh   chan struct{} // capacity 1; signaled on every ack
+	// ackAhead is an ack for bytes onSent has not counted yet. A block is counted once its write
+	// returns, and the peer's ack can be read before that: clamped to what was counted, the ack
+	// was lost. With nothing more sent on the tunnel no later ack came, its last block looked
+	// stuck for good and the scheduler never used the tunnel again (production 2026-10-01: a
+	// 14-byte disconnect block, 1.5 h).
+	ackAhead uint64
+	ackCh    chan struct{} // capacity 1; signaled on every ack
+	lastSent time.Time     // when the last block was counted by onSent (probe.go)
+	lastAck  time.Time     // when an ack last acknowledged something new (probe.go)
 
-	recv uint64 // bytes received; only touched by InboundRelay
+	recv    uint64 // bytes received; only touched by InboundRelay
+	unacked int    // blocks received but not acked yet (flowAckBatch); only touched by InboundRelay
 
 	// minRTT is the lifetime minimum. Samples include queueing, so a windowed minimum
 	// would ratchet upwards together with cwnd (self-inflicted bufferbloat).
@@ -164,12 +179,35 @@ func (f *flowState) onSent(blk block.Block, size int) {
 	now := time.Now()
 	var expect time.Duration
 	if flowLateAfter > 0 {
-		expect = f.schedRTTLocked() + f.queueLocked(size, now)
+		expect = f.schedRTTLocked() + f.queueLocked(size, 0, now)
 	}
 	f.sent += uint64(size)
+	f.lastSent = now
 	solo := len(f.pending) == 0
 	f.pending = append(f.pending, pendingBlock{end: f.sent, sentAt: now, ackedAt: f.acked, blk: blk, solo: solo, expect: expect})
+	acked := false
+	if f.ackAhead > f.acked {
+		// Acked before it was counted: drop it from pending without an RTT or rate sample, which
+		// would read as zero.
+		a := f.ackAhead
+		if a > f.sent {
+			a = f.sent
+		}
+		i := 0
+		for ; i < len(f.pending) && f.pending[i].end <= a; i++ {
+			f.pending[i] = pendingBlock{}
+		}
+		f.pending = f.pending[i:]
+		f.acked = a
+		acked = true
+	}
 	f.mu.Unlock()
+	if acked {
+		select {
+		case f.ackCh <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // onAck handles a cumulative ack. The wire carries the low 32 bits; in-flight
@@ -179,6 +217,7 @@ func (f *flowState) onAck(low uint32) {
 	f.mu.Lock()
 	acked := f.acked + uint64(low-uint32(f.acked))
 	if acked > f.sent {
+		f.ackAhead = acked
 		acked = f.sent
 	}
 	// Delivery-rate sample per acked block (as in BBR): bytes acked while that block was in
@@ -205,7 +244,18 @@ func (f *flowState) onAck(low uint32) {
 			}
 		}
 	}
-	f.pending = append(f.pending[:0], f.pending[i:]...)
+	// Drop the acked head by re-slicing: shifting the rest down on every ack was O(pending) per
+	// ack, quadratic with many small blocks (datagrams: thousands in flight per tunnel), and ate
+	// a quarter of the server's CPU in the tunnel's single inbound goroutine, which then acked
+	// late and capped UDP at ~140 Mbit/s (lab 2026-10-01). Cleared so the blocks can be freed;
+	// append reallocates when the capacity runs out, copying only what is still pending.
+	for j := 0; j < i; j++ {
+		f.pending[j] = pendingBlock{}
+	}
+	f.pending = f.pending[i:]
+	if acked > f.acked {
+		f.lastAck = now
+	}
 	f.acked = acked
 
 	if flowRateAvgWin > 0 {
@@ -264,7 +314,9 @@ func (f *flowState) takePending() []block.Block {
 	defer f.mu.Unlock()
 	blocks := make([]block.Block, 0, len(f.pending))
 	for _, p := range f.pending {
-		blocks = append(blocks, p.blk)
+		if p.blk.Type != block.TypePing { // a probe means nothing to another tunnel
+			blocks = append(blocks, p.blk)
+		}
 	}
 	f.pending = nil
 	return blocks
@@ -347,12 +399,17 @@ func (f *flowState) estimate(size int, now time.Time) (time.Duration, bool) {
 
 // estimateParts also returns the queueing part of the estimate.
 func (f *flowState) estimateParts(size int, now time.Time) (est, queue time.Duration, stuck bool) {
+	return f.estimateAtLeast(size, 0, now)
+}
+
+// estimateAtLeast is estimateParts with the measured delivery rate taken as at least minRate.
+func (f *flowState) estimateAtLeast(size int, minRate float64, now time.Time) (est, queue time.Duration, stuck bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.pending) > 0 && now.Sub(f.pending[0].sentAt) > f.stallAfterLocked() {
 		return 0, 0, true
 	}
-	queue = f.queueLocked(size, now)
+	queue = f.queueLocked(size, minRate, now)
 	est = f.schedRTTLocked() + queue
 	if flowLateAfter > 0 {
 		est += time.Duration(f.latePLocked(now) * float64(f.lateBy))
@@ -363,12 +420,24 @@ func (f *flowState) estimateParts(size int, now time.Time) (est, queue time.Dura
 	return est, queue, false
 }
 
+// measured reports whether the tunnel has a delivery rate sample yet.
+func (f *flowState) measured() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxRate > 0
+}
+
 // queueLocked is the time to deliver what is in flight plus size bytes at the measured rate.
-func (f *flowState) queueLocked(size int, now time.Time) time.Duration {
+// A measured rate below minRate counts as minRate.
+func (f *flowState) queueLocked(size int, minRate float64, now time.Time) time.Duration {
 	// A stale rate sample (tunnel idle or starved) is ignored, so the tunnel gets
 	// picked again and re-measured instead of being excluded forever.
 	if f.maxRate > 0 && now.Sub(f.maxRateAt) <= flowRateWindow {
-		return time.Duration(float64(f.sent-f.acked+uint64(size)) / f.maxRate * float64(time.Second))
+		rate := f.maxRate
+		if rate < minRate {
+			rate = minRate
+		}
+		return time.Duration(float64(f.sent-f.acked+uint64(size)) / rate * float64(time.Second))
 	} else if f.maxRate == 0 {
 		// A new tunnel has no rate yet and is in TCP slow start: counted as queue-free it looked
 		// like the fastest path and got a whole window at once, which it needs seconds to deliver
@@ -389,7 +458,7 @@ func (f *flowState) stuckBlocks(now time.Time) []block.Block {
 		if now.Sub(f.pending[i].sentAt) <= limit {
 			break
 		}
-		if !f.pending[i].reinjected {
+		if !f.pending[i].reinjected && f.pending[i].blk.Type != block.TypePing {
 			f.pending[i].reinjected = true
 			out = append(out, f.pending[i].blk)
 		}

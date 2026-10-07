@@ -76,16 +76,27 @@ func init() {
 		}
 		livePoolsMu.Unlock()
 		out["peers"] = peers
+		out["closes"] = recentCloses()
 		if a := debugAuto(); a != nil {
 			out["auto"] = a
 		}
 		out["reinjected"] = atomic.LoadUint64(&reinjectCnt)
 		out["nack_resent"] = atomic.LoadUint64(&NackResent)
 		out["dup_sent"] = atomic.LoadUint64(&DupSent)
+		out["dup_skipped"] = atomic.LoadUint64(&DupSkipped)
 		out["dgram_sent"] = atomic.LoadUint64(&DatagramSent)
 		out["dgram_recv"] = atomic.LoadUint64(&DatagramRecv)
 		out["dgram_queue_drop"] = atomic.LoadUint64(&DatagramQueueDrop)
 		out["dgram_too_old"] = atomic.LoadUint64(&DatagramTooOld)
+		out["dgram_hold_skip_timer"] = atomic.LoadUint64(&DatagramHoldSkipTimer)
+		out["dgram_hold_skip_full"] = atomic.LoadUint64(&DatagramHoldSkipFull)
+		out["dgram_hold_late"] = atomic.LoadUint64(&DatagramHoldLate)
+		out["dgram_moves"] = atomic.LoadUint64(&DatagramMoves)
+		out["dgram_moves_gone"] = atomic.LoadUint64(&DatagramMovesGone)
+		out["dgram_moves_stuck"] = atomic.LoadUint64(&DatagramMovesStuck)
+		out["dgram_moves_slow"] = atomic.LoadUint64(&DatagramMovesSlow)
+		out["probe_sent"] = atomic.LoadUint64(&ProbeSent)
+		out["probe_dead"] = atomic.LoadUint64(&ProbeDead)
 		out["nack_sent"] = connection.NackSent.Load()
 		out["bytes_sent"] = atomic.LoadUint64(&BytesSent)
 		out["dup_bytes"] = atomic.LoadUint64(&DupBytes)

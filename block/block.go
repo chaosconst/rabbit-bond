@@ -33,6 +33,11 @@ const (
 	// (BlockID); it is not ordered or re-sent, only de-duplicated.
 	TypeDatagram = 0x13
 
+	// TypePing (flow control only) is an empty block a client sends on a tunnel that has been idle
+	// for a while; the receiving tunnel acknowledges it like any block and drops it. An idle tunnel
+	// that died has nothing in flight, so without it the death only shows when traffic is put on it.
+	TypePing = 0x14
+
 	HeaderSize = 1 + 4 + 4 + 4
 	DataSize   = 16*1024 - 13
 	MaxSize    = HeaderSize + DataSize
@@ -145,4 +150,8 @@ func NewLineBlock(line string) Block {
 
 func NewDatagramBlock(sessionID uint32, seq uint32, frame []byte) Block {
 	return Block{Type: TypeDatagram, ConnectionID: sessionID, BlockID: seq, BlockLength: uint32(len(frame)), BlockData: frame}
+}
+
+func NewPingBlock() Block {
+	return Block{Type: TypePing}
 }

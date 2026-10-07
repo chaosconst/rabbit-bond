@@ -71,3 +71,32 @@ func TestWantDupDatagram(t *testing.T) {
 		t.Fatal("a large datagram is not")
 	}
 }
+
+func TestDupDatagramOnlyInSmallSessions(t *testing.T) {
+	defer func(d, a int) { flowDupDgram, flowDupAvg = d, a }(flowDupDgram, flowDupAvg)
+	flowDupDgram, flowDupAvg = 600, 400
+	dg := func(id uint32, n int) block.Block {
+		return block.Block{Type: block.TypeDatagram, ConnectionID: id, BlockData: make([]byte, n)}
+	}
+	// A game: small packets throughout, all duplicated.
+	for i := 0; i < 50; i++ {
+		if !wantDup(dg(1, 120)) {
+			t.Fatalf("game packet %d not duplicated", i)
+		}
+	}
+	// A bulk QUIC download: a 1200-byte Initial first, full packets, now and then a small one.
+	wantDup(dg(2, 1250))
+	for i := 0; i < 200; i++ {
+		n := 1250
+		if i%20 == 0 {
+			n = 300
+		}
+		if wantDup(dg(2, n)) {
+			t.Fatalf("packet %d (%d bytes) of a bulk session duplicated", i, n)
+		}
+	}
+	// Large packets are never duplicated, whatever the session.
+	if wantDup(dg(1, 900)) {
+		t.Fatalf("900-byte packet duplicated")
+	}
+}

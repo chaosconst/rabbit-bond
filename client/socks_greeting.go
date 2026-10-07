@@ -75,14 +75,16 @@ func answerSocks(conn net.Conn) (prefix []byte, drop socksDrop, udp bool, err er
 	if req[1] == 3 && socksUDP { // UDP ASSOCIATE
 		return nil, drop, true, nil
 	}
-	prefix = append(prefix, req...)
+	var first []byte
 	if req[1] == 1 { // CONNECT
 		if _, err = conn.Write(socksReplyConnected); err != nil {
 			return nil, drop, false, err
 		}
 		drop.connect = true
+		req, first = sniffRequest(conn, req) // socks_sniff.go
 	}
-	return prefix, drop, false, nil
+	prefix = append(prefix, req...)
+	return append(prefix, first...), drop, false, nil
 }
 
 // readSocksRequest reads VER CMD RSV ATYP ADDR PORT.

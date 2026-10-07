@@ -201,6 +201,19 @@ type streamConn struct {
 	w *writer
 }
 
+// Buffered returns how many bytes can be read without waiting on the network (decrypted or not):
+// when it is not 0 another block is already here, and an ack can wait for it.
+func (c *streamConn) Buffered() int {
+	if c.r == nil {
+		return 0
+	}
+	n := len(c.r.leftover)
+	if b, ok := c.r.Reader.(*bufio.Reader); ok {
+		n += b.Buffered()
+	}
+	return n
+}
+
 func (c *streamConn) initReader() error {
 	salt := make([]byte, c.SaltSize())
 	if _, err := io.ReadFull(c.Conn, salt); err != nil {

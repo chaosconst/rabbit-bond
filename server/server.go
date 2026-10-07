@@ -30,9 +30,12 @@ func (s *Server) Serve(address string) error {
 			s.logger.Errorf("Error when accept connection: %v.\n", err)
 			continue
 		}
-		err = s.peerGroup.AddTunnelFromConn(conn)
-		if err != nil {
-			s.logger.Errorf("Error when add tunnel to tunnel pool: %v.\n", err)
-		}
+		// Each in its own goroutine: the handshake waits for the client, and one connection that
+		// never sends it (a path that died while dialing) held up every later tunnel of every client.
+		go func(conn net.Conn) {
+			if err := s.peerGroup.AddTunnelFromConn(conn); err != nil {
+				s.logger.Errorf("Error when add tunnel to tunnel pool: %v.\n", err)
+			}
+		}(conn)
 	}
 }
